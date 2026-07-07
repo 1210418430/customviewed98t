@@ -70,11 +70,92 @@
         .custom-keyword-tag { background: #e9ecef; color: #495057; padding: 2px 6px; border-radius: 3px; font-size: 12px; display: inline-flex; align-items: center; gap: 5px; margin: 2px; }
         .custom-del-btn { color: #dc3545; cursor: pointer; font-weight: bold; }
         .custom-viewed-tag { background: #6c757d; color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 12px; margin-left: 8px; font-weight: normal; vertical-align: middle; }
+        #custom-img-lightbox {
+            position: fixed; z-index: 200000; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center;
+            cursor: zoom-out; transition: opacity 0.2s;
+        }
+        #custom-img-lightbox img {
+            max-width: 90vw; max-height: 90vh; object-fit: contain; border-radius: 6px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        #custom-img-lightbox .custom-lb-zone {
+            position: absolute; top: 0; height: 100%; width: 33.33%; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.2s;
+        }
+        #custom-img-lightbox .custom-lb-zone:hover { background: rgba(255,255,255,0.08); }
+        #custom-img-lightbox .custom-lb-zone-left { left: 0; }
+        #custom-img-lightbox .custom-lb-zone-center { left: 33.33%; }
+        #custom-img-lightbox .custom-lb-zone-right { left: 66.66%; }
+        #custom-img-lightbox .custom-lb-zone-label {
+            font-size: 18px; color: rgba(255,255,255,0.6); font-weight: bold;
+            padding: 12px 20px; border-radius: 8px; pointer-events: none;
+            background: rgba(0,0,0,0.3); backdrop-filter: blur(4px);
+        }
+        #custom-img-lightbox .custom-lb-zone:hover .custom-lb-zone-label {
+            color: #fff; background: rgba(0,0,0,0.5);
+        }
+        #custom-img-lightbox .custom-lb-counter {
+            position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+            color: #fff; font-size: 14px; text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+        }
     `);
 
     const tooltip = document.createElement('div');
     tooltip.id = 'custom-hover-tooltip';
     document.body.appendChild(tooltip);
+
+    // ================= 图片灯箱预览 =================
+    let lbImages = [];
+    let lbIndex = 0;
+    let lightbox = null;
+    let lbImg = null;
+    let lbCounter = null;
+
+    const openLightbox = (srcList, startIndex) => {
+        lbImages = srcList;
+        lbIndex = startIndex;
+        if (!lightbox) {
+            lightbox = document.createElement('div');
+            lightbox.id = 'custom-img-lightbox';
+            lightbox.style.display = 'none';
+            lightbox.innerHTML = `
+                <div class="custom-lb-zone custom-lb-zone-left"><span class="custom-lb-zone-label">◀ 上一张</span></div>
+                <div class="custom-lb-zone custom-lb-zone-center"><span class="custom-lb-zone-label">✕ 关闭</span></div>
+                <div class="custom-lb-zone custom-lb-zone-right"><span class="custom-lb-zone-label">下一张 ▶</span></div>
+                <span class="custom-lb-counter"></span>
+                <img>
+            `;
+            document.body.appendChild(lightbox);
+            lbImg = lightbox.querySelector('img');
+            lbCounter = lightbox.querySelector('.custom-lb-counter');
+            lightbox.querySelector('.custom-lb-zone-left').addEventListener('click', () => navigateLightbox(-1));
+            lightbox.querySelector('.custom-lb-zone-center').addEventListener('click', closeLightbox);
+            lightbox.querySelector('.custom-lb-zone-right').addEventListener('click', () => navigateLightbox(1));
+        }
+        updateLightbox();
+        lightbox.style.display = 'flex';
+    };
+
+    const closeLightbox = () => { if (lightbox) lightbox.style.display = 'none'; };
+
+    const updateLightbox = () => {
+        lbImg.src = lbImages[lbIndex];
+        lbCounter.innerText = (lbIndex + 1) + ' / ' + lbImages.length;
+    };
+
+    const navigateLightbox = (dir) => {
+        lbIndex = (lbIndex + dir + lbImages.length) % lbImages.length;
+        updateLightbox();
+    };
+
+    document.addEventListener('keydown', (e) => {
+        if (!lightbox || lightbox.style.display !== 'flex') return;
+        if (e.key === 'Escape') closeLightbox();
+        if (e.key === 'ArrowLeft') navigateLightbox(-1);
+        if (e.key === 'ArrowRight') navigateLightbox(1);
+    });
 
     // ================= 核心功能函数 =================
     const addViewedTag = (linkNode) => {
@@ -881,7 +962,13 @@
         // ---- 图片 ----
         if (data.images.length > 0) {
             const imgWrap = document.createElement('div');
-            imgWrap.innerHTML = data.images.map(src => `<img src="${src}" style="max-height:${STATE.imageSize}; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;" onclick="window.open('${src}')">`).join('');
+            imgWrap.innerHTML = data.images.map((src, i) => `<img src="${src}" data-idx="${i}" style="max-height:${STATE.imageSize}; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;">`).join('');
+            imgWrap.addEventListener('click', (e) => {
+                if (e.target.tagName === 'IMG') {
+                    e.preventDefault(); e.stopPropagation();
+                    openLightbox(data.images, parseInt(e.target.dataset.idx));
+                }
+            });
             box.appendChild(imgWrap);
         }
 
@@ -931,107 +1018,107 @@
             box.appendChild(lockedWrap);
         }
 
-        // ---- 资源链接（磁力/ed2k/种子/txt/压缩包） ----
-        const hasResources = data.magnets.length > 0 || data.ed2ks.length > 0 || data.torrents.length > 0 || data.txts.length > 0 || data.archives.length > 0;
+        // ---- 资源链接：磁力/ed2k/种子合并为一个文本框 ----
+        const allLinks = [];
+
+        data.magnets.forEach(m => allLinks.push(m));
+        data.ed2ks.forEach(link => allLinks.push(link));
+
+        // 种子 → 磁力链接转换
+        for (const t of data.torrents) {
+            const result = await torrentToMagnet(t.href);
+            if (result.magnet) allLinks.push(result.magnet);
+        }
+
+        // 收集 TXT 内容（独立 + 压缩包）
+        const allTexts = [];
+        for (const txt of data.txts) {
+            try {
+                const content = await fetchTxtContent(txt.href);
+                if (content) allTexts.push({ name: txt.name, content });
+            } catch (err) {
+                allTexts.push({ name: txt.name, content: `[读取失败: ${err.message}]` });
+            }
+        }
+        for (const archive of data.archives) {
+            try {
+                const result = await fetchAndExtractArchive(archive.href, archive.type);
+                if (result.error) {
+                    allTexts.push({ name: `${archive.name} (${archive.type})`, content: `[${result.error}]` });
+                } else if (result.txtFiles) {
+                    result.txtFiles.forEach(tf => allTexts.push({ name: `${archive.name} / ${tf.filename}`, content: tf.content }));
+                }
+            } catch (err) {
+                allTexts.push({ name: `${archive.name}`, content: `[解压失败: ${err.message}]` });
+            }
+        }
+
+        const hasResources = allLinks.length > 0 || allTexts.length > 0;
         if (hasResources) {
             const resWrap = document.createElement('div');
             resWrap.style.cssText = 'display:flex; flex-direction:column; gap:4px;';
 
-            data.magnets.forEach(m => {
-                resWrap.innerHTML += `<div style="display:flex; gap:5px;"><input type="text" value="${m}" readonly style="width:350px; font-size:12px; padding:2px;"><button type="button" onclick="event.preventDefault(); event.stopPropagation(); navigator.clipboard.writeText('${m}'); this.innerText='已复制'; setTimeout(()=>this.innerText='复制', 2000);" style="font-size:12px; cursor:pointer; padding:4px 8px; background-color: #6c757d; color: white; border: none; border-radius: 3px;">复制</button></div>`;
-            });
-
-            data.ed2ks.forEach(link => {
-                resWrap.innerHTML += `<div style="display:flex; gap:5px;"><input type="text" value="${link}" readonly style="width:350px; font-size:12px; padding:2px;"><button type="button" onclick="event.preventDefault(); event.stopPropagation(); navigator.clipboard.writeText('${link}'); this.innerText='已复制'; setTimeout(()=>this.innerText='复制', 2000);" style="font-size:12px; cursor:pointer; padding:4px 8px; background-color: #6c757d; color: white; border: none; border-radius: 3px;">复制</button></div>`;
-            });
-
-            // 种子 → 磁力链接转换
-            for (const t of data.torrents) {
-                const result = await torrentToMagnet(t.href);
-                if (result.magnet) {
-                    resWrap.innerHTML += `<div style="display:flex; gap:5px;"><input type="text" value="${result.magnet}" readonly style="width:350px; font-size:12px; padding:2px;"><button type="button" onclick="event.preventDefault(); event.stopPropagation(); navigator.clipboard.writeText('${result.magnet}'); this.innerText='已复制'; setTimeout(()=>this.innerText='复制', 2000);" style="font-size:12px; cursor:pointer; padding:4px 8px; background-color: #6c757d; color: white; border: none; border-radius: 3px;">复制</button></div>`;
+            // 链接合并文本框
+            if (allLinks.length > 0) {
+                const linkContent = allLinks.join('\n');
+                const linkWrap = document.createElement('div');
+                linkWrap.style.cssText = 'border:1px solid #dee2e6; border-radius:4px; padding:8px; background:#fdfdfd;';
+                const linkHeader = document.createElement('div');
+                linkHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;';
+                linkHeader.innerHTML = `<span style="font-size:12px; font-weight:bold; color:#495057;">🔗 链接 (${allLinks.length} 条：${data.magnets.length} 磁力 / ${data.ed2ks.length} ed2k / ${data.torrents.length} 种子)</span>`;
+                const linkCopyBtn = document.createElement('button');
+                linkCopyBtn.type = 'button'; linkCopyBtn.innerText = '复制全部链接';
+                linkCopyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px;';
+                linkCopyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(linkContent).then(() => { linkCopyBtn.innerText = '已复制'; setTimeout(() => linkCopyBtn.innerText = '复制全部链接', 2000); }); };
+                linkHeader.appendChild(linkCopyBtn);
+                linkWrap.appendChild(linkHeader);
+                const linkPre = document.createElement('pre');
+                linkPre.textContent = linkContent;
+                linkPre.style.cssText = 'max-height:200px; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:3px; font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0;';
+                linkWrap.appendChild(linkPre);
+                if (linkContent.length > 500) {
+                    const linkToggle = document.createElement('button');
+                    linkToggle.type = 'button'; linkToggle.innerText = '展开全文';
+                    linkToggle.style.cssText = 'font-size:11px; margin-top:4px; cursor:pointer; padding:2px 8px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
+                    linkToggle.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (linkPre.style.maxHeight === '200px') { linkPre.style.maxHeight = 'none'; linkToggle.innerText = '收起'; } else { linkPre.style.maxHeight = '200px'; linkToggle.innerText = '展开全文'; } };
+                    linkWrap.appendChild(linkToggle);
                 }
-                resWrap.innerHTML += `<div><a href="${t.href}" onclick="event.stopPropagation();" style="background:#007bff; color:#fff; padding:3px 8px; border-radius:3px; font-size:12px; text-decoration:none;">💾 ${result.magnet ? '下载原种子' : '下载种子'}: ${t.name}</a>${result.error ? ` <span style="font-size:10px; color:#dc3545;">(${result.error})</span>` : ''}</div>`;
+                resWrap.appendChild(linkWrap);
             }
 
-            // TXT 文件
-            for (const txt of data.txts) {
-                try {
-                    const content = await fetchTxtContent(txt.href);
-                    if (content) {
-                        const txtWrap = document.createElement('div');
-                        txtWrap.style.cssText = 'margin-top:6px; border:1px solid #dee2e6; border-radius:4px; padding:8px; background:#fdfdfd;';
-                        const txtHeader = document.createElement('div');
-                        txtHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;';
-                        txtHeader.innerHTML = `<span style="font-size:12px; font-weight:bold; color:#495057;">📄 ${txt.name.replace(/"/g, '&quot;').replace(/</g, '&lt;')}</span>`;
-                        const copyBtn = document.createElement('button');
-                        copyBtn.type = 'button'; copyBtn.innerText = '复制全文';
-                        copyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px;';
-                        copyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(content).then(() => { copyBtn.innerText = '已复制'; setTimeout(() => copyBtn.innerText = '复制全文', 2000); }); };
-                        txtHeader.appendChild(copyBtn); txtWrap.appendChild(txtHeader);
-                        const pre = document.createElement('pre');
-                        pre.textContent = content;
-                        pre.style.cssText = 'max-height:200px; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:3px; font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0;';
-                        txtWrap.appendChild(pre);
-                        if (content.length > 500) {
-                            const toggleBtn = document.createElement('button');
-                            toggleBtn.type = 'button'; toggleBtn.innerText = '展开全文';
-                            toggleBtn.style.cssText = 'font-size:11px; margin-top:4px; cursor:pointer; padding:2px 8px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
-                            toggleBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (pre.style.maxHeight === '200px') { pre.style.maxHeight = 'none'; toggleBtn.innerText = '收起'; } else { pre.style.maxHeight = '200px'; toggleBtn.innerText = '展开全文'; } };
-                            txtWrap.appendChild(toggleBtn);
-                        }
-                        resWrap.appendChild(txtWrap);
-                    }
-                } catch (err) {
-                    resWrap.innerHTML += `<div style="font-size:12px; color:#dc3545;">⚠️ 无法读取 ${txt.name.replace(/"/g, '&quot;')}: ${err.message} <a href="${txt.href}" onclick="event.stopPropagation();" style="color:#007bff;font-size:11px;">点此下载</a></div>`;
-                }
-            }
+            // TXT 内容合并文本框
+            if (allTexts.length > 0) {
+                const mergedContent = allTexts.map(t =>
+                    `━━━━ ${t.name} ━━━━\n${t.content}`
+                ).join('\n\n');
 
-            // 压缩包
-            for (const archive of data.archives) {
-                const archWrap = document.createElement('div');
-                archWrap.style.cssText = 'margin-top:6px; border:1px solid #dee2e6; border-radius:4px; padding:8px; background:#fdfdfd;';
-                const archHeader = document.createElement('div');
-                archHeader.style.cssText = 'font-size:12px; font-weight:bold; color:#495057; margin-bottom:6px;';
-                archHeader.innerHTML = `📦 ${archive.name.replace(/"/g, '&quot;').replace(/</g, '&lt;')} <span style="color:#6c757d;font-weight:normal;">(.${archive.type})</span>`;
-                archWrap.appendChild(archHeader);
-                try {
-                    const result = await fetchAndExtractArchive(archive.href, archive.type);
-                    if (result.error) {
-                        const errDiv = document.createElement('div');
-                        errDiv.style.cssText = 'font-size:11px; color:#856404; background:#fff3cd; padding:6px; border-radius:3px;';
-                        errDiv.innerHTML = `⚠️ ${result.error} <a href="${archive.href}" onclick="event.stopPropagation();" style="color:#007bff;">点击下载</a>`;
-                        archWrap.appendChild(errDiv);
-                    } else if (result.txtFiles && result.txtFiles.length > 0) {
-                        for (const tf of result.txtFiles) {
-                            const tfWrap = document.createElement('div'); tfWrap.style.cssText = 'margin-top:4px;';
-                            const tfHeader = document.createElement('div'); tfHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;';
-                            tfHeader.innerHTML = `<span style="font-size:11px; color:#007bff;">📑 ${tf.filename.replace(/"/g, '&quot;').replace(/</g, '&lt;')}</span>`;
-                            const copyBtn2 = document.createElement('button'); copyBtn2.type = 'button'; copyBtn2.innerText = '复制';
-                            copyBtn2.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#6c757d; color:#fff; border:none; border-radius:3px;';
-                            copyBtn2.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(tf.content).then(() => { copyBtn2.innerText = '已复制'; setTimeout(() => copyBtn2.innerText = '复制', 2000); }); };
-                            tfHeader.appendChild(copyBtn2); tfWrap.appendChild(tfHeader);
-                            const pre2 = document.createElement('pre'); pre2.textContent = tf.content;
-                            pre2.style.cssText = 'max-height:180px; overflow-y:auto; background:#f8f9fa; padding:6px; border-radius:3px; font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0;';
-                            tfWrap.appendChild(pre2);
-                            if (tf.content.length > 500) {
-                                const tb2 = document.createElement('button'); tb2.type = 'button'; tb2.innerText = '展开全文';
-                                tb2.style.cssText = 'font-size:10px; margin-top:3px; cursor:pointer; padding:1px 6px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
-                                tb2.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (pre2.style.maxHeight === '180px') { pre2.style.maxHeight = 'none'; tb2.innerText = '收起'; } else { pre2.style.maxHeight = '180px'; tb2.innerText = '展开全文'; } };
-                                tfWrap.appendChild(tb2);
-                            }
-                            archWrap.appendChild(tfWrap);
-                        }
-                    } else {
-                        const noTxt = document.createElement('div'); noTxt.style.cssText = 'font-size:11px; color:#6c757d;'; noTxt.innerText = '压缩包内未找到 .txt 文件';
-                        archWrap.appendChild(noTxt);
-                    }
-                } catch (err) {
-                    const errDiv2 = document.createElement('div'); errDiv2.style.cssText = 'font-size:11px; color:#dc3545;';
-                    errDiv2.innerHTML = `⚠️ 解压失败: ${err.message} <a href="${archive.href}" onclick="event.stopPropagation();" style="color:#007bff;">点击下载</a>`;
-                    archWrap.appendChild(errDiv2);
+                const txtWrap = document.createElement('div');
+                txtWrap.style.cssText = 'margin-top:6px; border:1px solid #dee2e6; border-radius:4px; padding:8px; background:#fdfdfd;';
+
+                const txtHeader = document.createElement('div');
+                txtHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;';
+                txtHeader.innerHTML = `<span style="font-size:12px; font-weight:bold; color:#495057;">📄 TXT 内容 (${allTexts.length} 个文件)</span>`;
+
+                const copyBtn = document.createElement('button');
+                copyBtn.type = 'button'; copyBtn.innerText = '复制全文';
+                copyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px;';
+                copyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(mergedContent).then(() => { copyBtn.innerText = '已复制'; setTimeout(() => copyBtn.innerText = '复制全文', 2000); }); };
+                txtHeader.appendChild(copyBtn);
+                txtWrap.appendChild(txtHeader);
+
+                const pre = document.createElement('pre');
+                pre.textContent = mergedContent;
+                pre.style.cssText = 'max-height:200px; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:3px; font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0;';
+                txtWrap.appendChild(pre);
+
+                if (mergedContent.length > 500) {
+                    const toggleBtn = document.createElement('button');
+                    toggleBtn.type = 'button'; toggleBtn.innerText = '展开全文';
+                    toggleBtn.style.cssText = 'font-size:11px; margin-top:4px; cursor:pointer; padding:2px 8px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
+                    toggleBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (pre.style.maxHeight === '200px') { pre.style.maxHeight = 'none'; toggleBtn.innerText = '收起'; } else { pre.style.maxHeight = '200px'; toggleBtn.innerText = '展开全文'; } };
+                    txtWrap.appendChild(toggleBtn);
                 }
-                resWrap.appendChild(archWrap);
+                resWrap.appendChild(txtWrap);
             }
             box.appendChild(resWrap);
         }
@@ -1110,6 +1197,152 @@
                 btnExtract.click();
             }
         }, 800);
+    }
+
+    // ================= 帖子详情页：内联 TXT/ZIP 内容展示 =================
+    const initDetailPage = async () => {
+        const postList = document.querySelector('#postlist');
+        if (!postList) return;
+        // 排除列表页（有多个 normalthread tbody 的是列表页）
+        if (document.querySelector('tbody[id^="normalthread_"]')) return;
+
+        const toAbs = (raw) => { try { return new URL(raw, location.href).href; } catch(e) { return raw; } };
+        const allMergedTexts = [];
+
+        // 遍历所有楼层
+        const posts = postList.querySelectorAll('div[id^="post_"]');
+        for (const post of posts) {
+            const contentEl = post.querySelector('.t_f, .pcb');
+            if (!contentEl) continue;
+
+            const seenUrls = new Set();
+            const linkEls = [];
+
+            // 收集 txt / zip / rar / 7z 链接
+            contentEl.querySelectorAll('a[href$=".txt"], a[href$=".TXT"], a[href$=".zip"], a[href$=".ZIP"], a[href$=".rar"], a[href$=".RAR"], a[href$=".7z"], a[href$=".7Z"], a[href*="mod=attachment"]').forEach(a => {
+                const href = toAbs(a.getAttribute('href'));
+                if (seenUrls.has(href)) return;
+                const text = a.innerText.trim() + ' ' + (a.nextElementSibling ? a.nextElementSibling.innerText : '');
+                if (text.includes('.txt') || href.toLowerCase().endsWith('.txt')) {
+                    seenUrls.add(href);
+                    linkEls.push({ el: a, href, name: text.trim() || '文本文件', type: 'txt' });
+                } else if (/\.(zip|rar|7z)$/i.test(href) || /\.(zip|rar|7z)/i.test(text)) {
+                    seenUrls.add(href);
+                    const ext = href.match(/\.(zip|rar|7z)$/i)?.[1]?.toLowerCase() || 'zip';
+                    linkEls.push({ el: a, href, name: text.trim() || '压缩包', type: ext });
+                }
+            });
+
+            if (linkEls.length === 0) continue;
+
+            // 逐个处理：内联显示在链接下方 + 收集到全局
+            for (const info of linkEls) {
+                let content = null;
+
+                if (info.type === 'txt') {
+                    try {
+                        content = await fetchTxtContent(info.href);
+                    } catch (err) {
+                        content = `[读取失败: ${err.message}]`;
+                    }
+                } else if (info.type === 'zip') {
+                    try {
+                        const result = await fetchAndExtractArchive(info.href, 'zip');
+                        if (result.error) {
+                            content = `[${result.error}]`;
+                        } else if (result.txtFiles && result.txtFiles.length > 0) {
+                            content = result.txtFiles.map(tf =>
+                                `━━ ${tf.filename} ━━\n${tf.content}`
+                            ).join('\n\n');
+                        } else {
+                            content = '[压缩包内未找到 .txt 文件]';
+                        }
+                    } catch (err) {
+                        content = `[解压失败: ${err.message}]`;
+                    }
+                } else {
+                    content = `[${info.type.toUpperCase()} 格式需在本地解压，浏览器无法直接处理]`;
+                }
+
+                if (content) {
+                    allMergedTexts.push({ name: info.name, content });
+
+                    // ---- 内联展示：在链接正下方插入 ----
+                    const inlineWrap = document.createElement('div');
+                    inlineWrap.style.cssText = 'margin:6px 0; border:1px solid #dee2e6; border-radius:4px; padding:8px; background:#fdfdfd;';
+
+                    const inlineHeader = document.createElement('div');
+                    inlineHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;';
+                    const icon = info.type === 'txt' ? '📄' : '📦';
+                    inlineHeader.innerHTML = `<span style="font-size:12px; font-weight:bold; color:#495057;">${icon} ${info.name.replace(/</g, '&lt;')}</span>`;
+                    const inlineCopyBtn = document.createElement('button');
+                    inlineCopyBtn.type = 'button'; inlineCopyBtn.innerText = '复制';
+                    inlineCopyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px;';
+                    inlineCopyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(content).then(() => { inlineCopyBtn.innerText = '已复制'; setTimeout(() => inlineCopyBtn.innerText = '复制', 2000); }); };
+                    inlineHeader.appendChild(inlineCopyBtn);
+                    inlineWrap.appendChild(inlineHeader);
+
+                    const inlinePre = document.createElement('pre');
+                    inlinePre.textContent = content;
+                    inlinePre.style.cssText = 'max-height:200px; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:3px; font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0;';
+                    inlineWrap.appendChild(inlinePre);
+
+                    if (content.length > 500) {
+                        const inlineToggle = document.createElement('button');
+                        inlineToggle.type = 'button'; inlineToggle.innerText = '展开全文';
+                        inlineToggle.style.cssText = 'font-size:11px; margin-top:4px; cursor:pointer; padding:2px 8px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
+                        inlineToggle.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (inlinePre.style.maxHeight === '200px') { inlinePre.style.maxHeight = 'none'; inlineToggle.innerText = '收起'; } else { inlinePre.style.maxHeight = '200px'; inlineToggle.innerText = '展开全文'; } };
+                        inlineWrap.appendChild(inlineToggle);
+                    }
+
+                    // 插入到链接的下一个兄弟节点之后
+                    info.el.parentNode.insertBefore(inlineWrap, info.el.nextSibling.nextSibling || info.el.nextSibling);
+                }
+            }
+        }
+
+        // ---- 页面顶部：合并所有内容 ----
+        if (allMergedTexts.length > 0) {
+            const mergedContent = allMergedTexts.map(t =>
+                `━━━━ ${t.name} ━━━━\n${t.content}`
+            ).join('\n\n');
+
+            const topWrap = document.createElement('div');
+            topWrap.style.cssText = 'max-width:980px; margin:0 auto 16px; border:2px solid #ffc107; border-radius:6px; padding:12px; background:#fffdf5;';
+
+            const topHeader = document.createElement('div');
+            topHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;';
+            topHeader.innerHTML = `<span style="font-size:14px; font-weight:bold; color:#495057;">📄 本帖 TXT/ZIP 内容汇总 (${allMergedTexts.length} 个文件)</span>`;
+
+            const topCopyBtn = document.createElement('button');
+            topCopyBtn.type = 'button'; topCopyBtn.innerText = '复制全部';
+            topCopyBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 12px; background:#6c757d; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+            topCopyBtn.onclick = () => { navigator.clipboard.writeText(mergedContent).then(() => { topCopyBtn.innerText = '已复制'; setTimeout(() => topCopyBtn.innerText = '复制全部', 2000); }); };
+            topHeader.appendChild(topCopyBtn);
+            topWrap.appendChild(topHeader);
+
+            const topPre = document.createElement('pre');
+            topPre.textContent = mergedContent;
+            topPre.style.cssText = 'max-height:300px; overflow-y:auto; background:#f8f9fa; padding:10px; border-radius:4px; font-size:12px; white-space:pre-wrap; word-break:break-all; margin:0;';
+            topWrap.appendChild(topPre);
+
+            if (mergedContent.length > 800) {
+                const topToggle = document.createElement('button');
+                topToggle.type = 'button'; topToggle.innerText = '展开全文';
+                topToggle.style.cssText = 'font-size:12px; margin-top:6px; cursor:pointer; padding:4px 12px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
+                topToggle.onclick = () => { if (topPre.style.maxHeight === '300px') { topPre.style.maxHeight = 'none'; topToggle.innerText = '收起'; } else { topPre.style.maxHeight = '300px'; topToggle.innerText = '展开全文'; } };
+                topWrap.appendChild(topToggle);
+            }
+
+            // 插入到页面顶部
+            const insertTarget = postList.parentNode || document.body;
+            insertTarget.insertBefore(topWrap, postList);
+        }
+    };
+
+    // 仅在详情页执行（非列表页）
+    if (!document.querySelector('tbody[id^="normalthread_"]')) {
+        initDetailPage();
     }
 
 })();
