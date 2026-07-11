@@ -54,6 +54,11 @@
         offline115RenameRules: GM_getValue('offline_115_rename_rules', []),
         offline115LogMaxLines: GM_getValue('offline_115_log_max', 100),
         quickReplyText: GM_getValue('custom_quick_reply_text', '谢谢楼主分享'),
+        resetWidth: GM_getValue('custom_reset_width', false),
+        resetWidthPx: GM_getValue('custom_reset_width_px', 1500),
+        hiddenTids: GM_getValue('custom_hidden_tids', []),
+        hiddenTidsMaxDays: GM_getValue('custom_hidden_tids_max_days', 30),
+        panelMinimized: false,
         threadCache: {},
         isLoadingNextPage: false,
         nextPageUrl: document.querySelector('a.nxt') ? document.querySelector('a.nxt').href : null
@@ -63,8 +68,25 @@
     if (!Array.isArray(STATE.blockedUsers)) STATE.blockedUsers = [];
     if (!Array.isArray(STATE.highlighted)) STATE.highlighted = [];
     if (!Array.isArray(STATE.readLinks)) STATE.readLinks = [];
+    if (!Array.isArray(STATE.hiddenTids)) STATE.hiddenTids = [];
 
     const saveState = (key, value) => { GM_setValue(key, value); };
+
+    // 自动清理过期记录 + 构建 Set 加速查找
+    const HIDDEN_TID_SET = new Set();
+    (function _cleanupHiddenTids() {
+        const now = Date.now();
+        const maxAge = (STATE.hiddenTidsMaxDays || 30) * 86400000;
+        // 旧格式兼容：纯 tid 字符串转新格式 [tid, ts]
+        STATE.hiddenTids = STATE.hiddenTids.map(entry =>
+            Array.isArray(entry) ? entry : [entry, now]
+        ).filter(entry => {
+            if (now - entry[1] > maxAge) return false;
+            HIDDEN_TID_SET.add('tid=' + entry[0]);
+            return true;
+        });
+        saveState('custom_hidden_tids', STATE.hiddenTids);
+    })();
     const markAsRead = (url) => {
         if (!STATE.readLinks.includes(url)) {
             STATE.readLinks.push(url);
@@ -1198,8 +1220,10 @@
 
         const isKeywordBlocked = STATE.blocked.some(kw => title.includes(kw));
         const isUserBlocked = STATE.blockedUsers.includes(authorName) || (authorUID && STATE.blockedUsers.includes(authorUID));
+        const _tidMatch = url.match(/tid=(\d+)/);
+        const isTidHidden = _tidMatch ? HIDDEN_TID_SET.has('tid=' + _tidMatch[1]) : false;
 
-        if (isKeywordBlocked || isUserBlocked) {
+        if (isKeywordBlocked || isUserBlocked || isTidHidden) {
             tbody.classList.add('custom-hidden');
             cb.checked = false;
         } else if (STATE.highlighted.some(kw => title.includes(kw))) {
@@ -1242,8 +1266,11 @@
 
             const isKeywordBlocked = STATE.blocked.some(kw => title.includes(kw));
             const isUserBlocked = STATE.blockedUsers.includes(authorName) || (authorUID && STATE.blockedUsers.includes(authorUID));
+            const url = link.href;
+            const _tidMatch = url.match(/tid=(\d+)/);
+        const isTidHidden = _tidMatch ? HIDDEN_TID_SET.has('tid=' + _tidMatch[1]) : false;
 
-            if (isKeywordBlocked || isUserBlocked) {
+            if (isKeywordBlocked || isUserBlocked || isTidHidden) {
                 tbody.classList.add('custom-hidden');
                 let cb = tbody.querySelector('.custom-thread-checkbox');
                 if (cb) cb.checked = false;
@@ -1306,6 +1333,39 @@
             autoLoadNextPage();
         }
     });
+
+    // ================= 宽屏设置 =================
+    const applyResetWidth = () => {
+        if (STATE.resetWidth) {
+            const px = STATE.resetWidthPx || 1500;
+            // 尝试多种 Discuz! 常见容器选择器
+            const selectors = ['.wp', '#nv', '#ct', '.ct2', '#wrap', '.wrap', '.container', '#append_parent'];
+            selectors.forEach(sel => {
+                const el = document.querySelector(sel);
+                if (el) el.style.width = px + 'px';
+            });
+            // 同时注入全局 CSS（兜底，强制覆盖）
+            const styleId = 'custom-reset-width-style';
+            let styleEl = document.getElementById(styleId);
+            if (!styleEl) {
+                styleEl = document.createElement('style');
+                styleEl.id = styleId;
+                document.head.appendChild(styleEl);
+            }
+            styleEl.textContent = `.wp,#nv,#ct,.ct2,#wrap,.wrap,.container{width:${px}px !important;margin:0 auto !important;}`;
+        } else {
+            // 移除 CSS
+            const styleEl = document.getElementById('custom-reset-width-style');
+            if (styleEl) styleEl.remove();
+            // 清除 inline style
+            const selectors = ['.wp', '#nv', '#ct', '.ct2', '#wrap', '.wrap', '.container', '#append_parent'];
+            selectors.forEach(sel => {
+                const el = document.querySelector(sel);
+                if (el) el.style.width = '';
+            });
+        }
+    };
+    applyResetWidth();
 
     // ================= UI 控制面板 =================
     const panel = document.createElement('div');
@@ -1616,6 +1676,195 @@
     });
     quickReplyRow.appendChild(quickReplyInput);
     settingsPanel.appendChild(quickReplyRow);
+
+    // 宽屏设置
+    const resetWidthRow = document.createElement('div');
+    resetWidthRow.style.cssText = 'display: flex; align-items: center; gap: 6px; padding-bottom: 10px; border-bottom: 1px dashed #ccc; flex-wrap: wrap;';
+    const resetWidthLabel = document.createElement('span');
+    resetWidthLabel.innerText = '🖥️ 宽屏宽度';
+    resetWidthLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const resetWidthSwitch = document.createElement('input');
+    resetWidthSwitch.type = 'checkbox';
+    resetWidthSwitch.checked = STATE.resetWidth;
+    resetWidthSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    const resetWidthInput = document.createElement('input');
+    resetWidthInput.type = 'number';
+    resetWidthInput.min = 500; resetWidthInput.max = 5000;
+    resetWidthInput.value = STATE.resetWidthPx;
+    resetWidthInput.style.cssText = 'width:70px; padding:2px 4px; font-size:12px; border:1px solid #ccc; border-radius:3px;';
+    const resetWidthUnit = document.createElement('span');
+    resetWidthUnit.innerText = 'px';
+    resetWidthUnit.style.cssText = 'font-size:12px; color:#555;';
+    resetWidthSwitch.onchange = (e) => {
+        STATE.resetWidth = e.target.checked;
+        saveState('custom_reset_width', STATE.resetWidth);
+        applyResetWidth();
+    };
+    resetWidthInput.addEventListener('input', () => {
+        const v = parseInt(resetWidthInput.value) || 1500;
+        STATE.resetWidthPx = Math.max(500, Math.min(5000, v));
+        saveState('custom_reset_width_px', STATE.resetWidthPx);
+        applyResetWidth();
+    });
+    resetWidthRow.appendChild(resetWidthLabel);
+    resetWidthRow.appendChild(resetWidthSwitch);
+    resetWidthRow.appendChild(resetWidthInput);
+    resetWidthRow.appendChild(resetWidthUnit);
+    settingsPanel.appendChild(resetWidthRow);
+
+    // 隐藏帖子保留天数
+    const hideTidsDaysRow = document.createElement('div');
+    hideTidsDaysRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const hideTidsDaysLabel = document.createElement('span');
+    hideTidsDaysLabel.innerText = '📅 隐藏记录保留天数';
+    hideTidsDaysLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const hideTidsDaysSelect = document.createElement('select');
+    hideTidsDaysSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [7, 14, 30, 60, 90, 180, 365, 0].forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n; opt.innerText = n === 0 ? '永久保留' : n + ' 天';
+        if (n === STATE.hiddenTidsMaxDays) opt.selected = true;
+        hideTidsDaysSelect.appendChild(opt);
+    });
+    hideTidsDaysSelect.onchange = (e) => {
+        STATE.hiddenTidsMaxDays = parseInt(e.target.value);
+        saveState('custom_hidden_tids_max_days', STATE.hiddenTidsMaxDays);
+        if (STATE.hiddenTidsMaxDays === 0) return; // 永久保留不清除
+        const maxAge = STATE.hiddenTidsMaxDays * 86400000;
+        const now = Date.now();
+        STATE.hiddenTids = STATE.hiddenTids.filter(entry => {
+            if (now - entry[1] > maxAge) {
+                HIDDEN_TID_SET.delete('tid=' + entry[0]);
+                return false;
+            }
+            return true;
+        });
+        saveState('custom_hidden_tids', STATE.hiddenTids);
+        reapplyFilters();
+        showToast(`✅ 已清理过期记录（当前 ${STATE.hiddenTids.length} 条）`, 'success');
+    };
+    hideTidsDaysRow.appendChild(hideTidsDaysLabel);
+    hideTidsDaysRow.appendChild(hideTidsDaysSelect);
+    settingsPanel.appendChild(hideTidsDaysRow);
+
+    // 隐藏记录管理（放在设置面板中，避免误触）
+    const hiddenTidsManageWrap = document.createElement('div');
+    hiddenTidsManageWrap.style.cssText = 'padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+
+    const hiddenTidsTitle = document.createElement('div');
+    hiddenTidsTitle.style.cssText = 'font-weight:bold; font-size:13px; margin-bottom:6px;';
+    hiddenTidsTitle.innerText = `🗑️ 管理隐藏记录（当前 ${STATE.hiddenTids.length} 条）`;
+    hiddenTidsManageWrap.appendChild(hiddenTidsTitle);
+
+    const updateHiddenTidsTitle = () => {
+        hiddenTidsTitle.innerText = `🗑️ 管理隐藏记录（当前 ${STATE.hiddenTids.length} 条）`;
+    };
+
+    // 辅助函数：清除指定条件的记录并刷新
+    const clearHiddenTidsByFilter = (filterFn, desc) => {
+        const before = STATE.hiddenTids.length;
+        const removed = [];
+        STATE.hiddenTids = STATE.hiddenTids.filter(entry => {
+            if (filterFn(entry)) {
+                HIDDEN_TID_SET.delete('tid=' + entry[0]);
+                removed.push(entry);
+                return false;
+            }
+            return true;
+        });
+        const after = STATE.hiddenTids.length;
+        saveState('custom_hidden_tids', STATE.hiddenTids);
+        document.querySelectorAll('tbody[id^="normalthread_"].custom-hidden').forEach(tbody => {
+            tbody.classList.remove('custom-hidden');
+        });
+        reapplyFilters();
+        updateHiddenTidsTitle();
+        showToast(`✅ 已清除 ${before - after} 条记录（${desc}）`, 'success');
+    };
+
+    // 1. 清除 N 天前的记录
+    const clearDaysRow = document.createElement('div');
+    clearDaysRow.style.cssText = 'display: flex; align-items: center; gap: 4px; margin-bottom: 6px;';
+    const clearDaysLabel = document.createElement('span');
+    clearDaysLabel.innerText = '清除';
+    clearDaysLabel.style.cssText = 'font-size:11px; color:#555; white-space:nowrap;';
+    const clearDaysSelect = document.createElement('select');
+    clearDaysSelect.style.cssText = 'cursor: pointer; font-size:11px; padding:2px; flex:1;';
+    [1, 3, 7, 14, 30, 60, 90, 180, 365].forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n;
+        const labels = {1:'1 天', 7:'7 天 (一周)', 14:'14 天', 30:'30 天 (一个月)', 60:'60 天', 90:'90 天 (三个月)', 180:'180 天 (半年)', 365:'365 天 (一年)'};
+        opt.innerText = labels[n] || n + ' 天';
+        if (n === 30) opt.selected = true;
+        clearDaysSelect.appendChild(opt);
+    });
+    const clearDaysLabel2 = document.createElement('span');
+    clearDaysLabel2.innerText = '前的记录';
+    clearDaysLabel2.style.cssText = 'font-size:11px; color:#555; white-space:nowrap;';
+    const clearDaysBtn = document.createElement('button');
+    clearDaysBtn.type = 'button';
+    clearDaysBtn.innerText = '执行';
+    clearDaysBtn.style.cssText = 'padding:2px 10px; font-size:11px; cursor:pointer; background:#dc3545; color:#fff; border:none; border-radius:3px; font-weight:bold; white-space:nowrap;';
+    clearDaysBtn.onclick = () => {
+        const days = parseInt(clearDaysSelect.value);
+        const cutoff = Date.now() - days * 86400000;
+        clearHiddenTidsByFilter(entry => entry[1] < cutoff, `${days} 天前`);
+    };
+    clearDaysRow.appendChild(clearDaysLabel);
+    clearDaysRow.appendChild(clearDaysSelect);
+    clearDaysRow.appendChild(clearDaysLabel2);
+    clearDaysRow.appendChild(clearDaysBtn);
+    hiddenTidsManageWrap.appendChild(clearDaysRow);
+
+    // 2. 清除指定日期之前的记录
+    const clearDateRow = document.createElement('div');
+    clearDateRow.style.cssText = 'display: flex; align-items: center; gap: 4px; margin-bottom: 6px;';
+    const clearDateLabel = document.createElement('span');
+    clearDateLabel.innerText = '清除';
+    clearDateLabel.style.cssText = 'font-size:11px; color:#555; white-space:nowrap;';
+    const clearDateInput = document.createElement('input');
+    clearDateInput.type = 'date';
+    clearDateInput.style.cssText = 'flex:1; padding:2px 4px; font-size:11px; border:1px solid #ccc; border-radius:3px;';
+    const clearDateLabel2 = document.createElement('span');
+    clearDateLabel2.innerText = '前的记录';
+    clearDateLabel2.style.cssText = 'font-size:11px; color:#555; white-space:nowrap;';
+    const clearDateBtn = document.createElement('button');
+    clearDateBtn.type = 'button';
+    clearDateBtn.innerText = '执行';
+    clearDateBtn.style.cssText = 'padding:2px 10px; font-size:11px; cursor:pointer; background:#dc3545; color:#fff; border:none; border-radius:3px; font-weight:bold; white-space:nowrap;';
+    clearDateBtn.onclick = () => {
+        const dateVal = clearDateInput.value;
+        if (!dateVal) { showToast('请先选择日期', 'error'); return; }
+        const cutoff = new Date(dateVal + 'T00:00:00').getTime();
+        clearHiddenTidsByFilter(entry => entry[1] < cutoff, `${dateVal} 之前`);
+    };
+    clearDateRow.appendChild(clearDateLabel);
+    clearDateRow.appendChild(clearDateInput);
+    clearDateRow.appendChild(clearDateLabel2);
+    clearDateRow.appendChild(clearDateBtn);
+    hiddenTidsManageWrap.appendChild(clearDateRow);
+
+    // 3. 清除全部记录（需二次确认）
+    const clearAllRow = document.createElement('div');
+    clearAllRow.style.cssText = 'display: flex; align-items: center; gap: 4px;';
+    const clearAllBtn = document.createElement('button');
+    clearAllBtn.type = 'button';
+    clearAllBtn.innerText = '⚠️ 清空全部隐藏记录';
+    clearAllBtn.style.cssText = 'padding:3px 8px; font-size:11px; cursor:pointer; background:#dc3545; color:#fff; border:1px solid #b02a37; border-radius:3px; font-weight:bold; width:100%;';
+    clearAllBtn.onclick = () => {
+        if (!confirm(`确定清空全部 ${STATE.hiddenTids.length} 条隐藏记录？此操作不可撤销。`)) return;
+        if (!confirm(`再次确认：确定清空全部 ${STATE.hiddenTids.length} 条隐藏记录？`)) return;
+        clearHiddenTidsByFilter(() => true, '全部');
+    };
+    clearAllRow.appendChild(clearAllBtn);
+    hiddenTidsManageWrap.appendChild(clearAllRow);
+
+    settingsPanel.appendChild(hiddenTidsManageWrap);
+
+    // 永久隐藏帖子按钮（放在 btnGroup 主面板，不在设置里）
+
+    // TODO: 以下设置项对应的功能暂未启用，隐藏
+    renameRulesWrap.style.display = 'none';
 
     // 日志最大显示行数
     const logMaxRow = document.createElement('div');
@@ -2621,10 +2870,132 @@
     btnOffline115.onclick = () => offline115Panel.style.display = offline115Panel.style.display === 'none' ? 'flex' : 'none';
     btnGroup.appendChild(btnOffline115);
 
+    // 永久隐藏帖子 —— 共用记录函数
+    const recordCurrentPageTids = () => {
+        const now = Date.now();
+        let added = 0;
+        document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
+            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            if (link) {
+                const tidMatch = link.href.match(/tid=(\d+)/);
+                if (tidMatch) {
+                    const key = 'tid=' + tidMatch[1];
+                    if (!HIDDEN_TID_SET.has(key)) {
+                        HIDDEN_TID_SET.add(key);
+                        STATE.hiddenTids.push([tidMatch[1], now]);
+                        added++;
+                    }
+                }
+            }
+        });
+        saveState('custom_hidden_tids', STATE.hiddenTids);
+        return added;
+    };
+
+    const btnHideTidsRecord = createBtn('📝 记录当前页所有帖子', '#fd7e14');
+    btnHideTidsRecord.onclick = () => {
+        const added = recordCurrentPageTids();
+        reapplyFilters();
+        showToast(`✅ 已记录 ${added} 条新帖子（累计 ${STATE.hiddenTids.length} 条）`, 'success');
+    };
+    btnGroup.appendChild(btnHideTidsRecord);
+
+    // 拦截分页跳转：跳转前提示记录当前页帖子
+    let _pageNavBusy = false;
+    document.addEventListener('click', (e) => {
+        if (_pageNavBusy) return;
+        const pgLink = e.target.closest('.pg a[href]');
+        const autopbn = e.target.closest('#autopbn');
+        if (!pgLink && !autopbn) return;
+        // 排除当前页指示器（strong 标签）
+        if (!pgLink && e.target.closest('strong')) return;
+
+        // 统计当前页未记录的可见帖子
+        let unrecorded = 0;
+        document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden)').forEach(tbody => {
+            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            if (link) {
+                const tidMatch = link.href.match(/tid=(\d+)/);
+                if (tidMatch && !HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
+                    unrecorded++;
+                }
+            }
+        });
+        if (unrecorded === 0) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const destUrl = pgLink ? pgLink.href : '';
+
+        if (confirm(`⚠️ 当前页有 ${unrecorded} 条帖子未记录，跳转前是否记录？\n\n"确定" = 自动记录并跳转\n"取消" = 不记录直接跳转`)) {
+            const added = recordCurrentPageTids();
+            reapplyFilters();
+            showToast(`✅ 已记录 ${added} 条帖子（累计 ${STATE.hiddenTids.length} 条）`, 'success');
+        }
+
+        _pageNavBusy = true;
+        if (destUrl && !destUrl.startsWith('javascript:')) {
+            window.location.href = destUrl;
+        } else if (autopbn) {
+            const rel = autopbn.getAttribute('rel') || '';
+            if (rel) window.location.href = rel;
+        }
+    }, true);
+
+
     panel.appendChild(settingsPanel);
     panel.appendChild(offline115Panel);
     panel.appendChild(btnGroup);
+    // 面板溢出时滚动
+    panel.style.maxHeight = 'calc(100vh - 100px)';
+    panel.style.overflowY = 'auto';
     document.body.appendChild(panel);
+
+    // 面板折叠小球
+    const minimizeBall = document.createElement('div');
+    minimizeBall.style.cssText = 'position:fixed; bottom:50px; right:50px; z-index:100000; width:36px; height:36px; background:#007bff; color:#fff; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; font-size:16px; font-weight:bold; box-shadow:0 4px 12px rgba(0,0,0,0.3); user-select:none;';
+    minimizeBall.innerText = '⚙';
+    minimizeBall.title = '展开面板';
+    minimizeBall.onclick = () => {
+        panel.style.display = ''; minimizeBall.style.display = 'none';
+        STATE.panelMinimized = false;
+    };
+    document.body.appendChild(minimizeBall);
+
+    // 面板右上角折叠按钮
+    const minimizeBtn = document.createElement('div');
+    minimizeBtn.style.cssText = 'position:absolute; top:-12px; right:-12px; width:24px; height:24px; background:#dc3545; color:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:14px; box-shadow:0 2px 8px rgba(0,0,0,0.2); z-index:1;';
+    minimizeBtn.innerText = '−';
+    minimizeBtn.title = '折叠面板';
+    minimizeBtn.style.position = 'fixed';
+    minimizeBtn.style.bottom = 'auto';
+    minimizeBtn.style.top = 'auto';
+    minimizeBtn.onclick = (e) => {
+        e.stopPropagation();
+        panel.style.display = 'none'; minimizeBall.style.display = 'flex';
+        STATE.panelMinimized = true;
+        minimizeBtn.style.display = 'none';
+    };
+    minimizeBall.onclick = () => {
+        panel.style.display = ''; minimizeBall.style.display = 'none'; minimizeBtn.style.display = 'flex';
+        STATE.panelMinimized = false;
+    };
+    document.body.appendChild(minimizeBtn);
+
+    // 定位折叠按钮到面板右上角
+    const updateMinBtnPos = () => {
+        if (panel.style.display === 'none') { minimizeBtn.style.display = 'none'; return; }
+        const rect = panel.getBoundingClientRect();
+        minimizeBtn.style.display = 'flex';
+        minimizeBtn.style.top = (rect.top - 12) + 'px';
+        minimizeBtn.style.left = (rect.right - 12) + 'px';
+    };
+    updateMinBtnPos();
+    // 监听面板变化（简单轮询或用 ResizeObserver）
+    new MutationObserver(updateMinBtnPos).observe(panel, { attributes: true, childList: true, subtree: true });
+    window.addEventListener('resize', updateMinBtnPos);
+    window.addEventListener('scroll', updateMinBtnPos);
 
     // ================= 启动时自动全选并提取 =================
     if (STATE.autoExtractOnLoad) {
