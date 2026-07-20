@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      14.0
-// @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载
+// @version      15.5
+// @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
 // 【维护规则】每次功能变更后，必须同步更新项目根目录的 README.md 文件。
@@ -59,6 +59,27 @@
         hiddenTids: GM_getValue('custom_hidden_tids', []),
         hiddenTidsMaxDays: GM_getValue('custom_hidden_tids_max_days', 30),
         panelMinimized: false,
+        panelStartMinimized: GM_getValue('custom_panel_start_minimized', false),
+        panelPosition: GM_getValue('custom_panel_position', 'bottom-right'), // 'bottom-right' | 'center' | 'top-left'
+        bulkLoadPageCount: GM_getValue('custom_bulk_load_count', 3),
+        autoBulkLoadOnPageLoad: GM_getValue('custom_auto_bulk_load', false),
+        gistToken: GM_getValue('custom_gist_token', ''),
+        gistId: GM_getValue('custom_gist_id', ''),
+        gistBackupEnabled: GM_getValue('custom_gist_backup_enabled', false),
+        bookmarks: GM_getValue('custom_bookmarks', []),
+        bookmarksGistBackupEnabled: GM_getValue('custom_bookmarks_gist_backup', false),
+        bookmarksPanelActiveTab: GM_getValue('custom_bookmarks_active_tab', 'important'),
+        dashboardX: GM_getValue('custom_dashboard_x', null),
+        dashboardY: GM_getValue('custom_dashboard_y', null),
+        dashboardW: GM_getValue('custom_dashboard_w', 750),
+        dashboardH: GM_getValue('custom_dashboard_h', 520),
+        scrollBallX: GM_getValue('custom_scroll_ball_x', null),
+        scrollBallY: GM_getValue('custom_scroll_ball_y', null),
+        scrollSpeed1: GM_getValue('custom_scroll_speed_1', 80),
+        scrollSpeed2: GM_getValue('custom_scroll_speed_2', 200),
+        scrollSpeed3: GM_getValue('custom_scroll_speed_3', 400),
+        scrollMaxSpeed: GM_getValue('custom_scroll_max_speed', 600),
+        scrollSensitivity: GM_getValue('custom_scroll_sensitivity', 2),
         threadCache: {},
         isLoadingNextPage: false,
         nextPageUrl: document.querySelector('a.nxt') ? document.querySelector('a.nxt').href : null
@@ -69,6 +90,39 @@
     if (!Array.isArray(STATE.highlighted)) STATE.highlighted = [];
     if (!Array.isArray(STATE.readLinks)) STATE.readLinks = [];
     if (!Array.isArray(STATE.hiddenTids)) STATE.hiddenTids = [];
+    if (!Array.isArray(STATE.bookmarks)) STATE.bookmarks = [];
+    STATE.tempUnhiddenSet = new Set(); // 会话级临时解除隐藏，刷新后恢复
+
+    // ================= 书签操作 =================
+    const addBookmark = (tid, title, url, type) => {
+        const idx = STATE.bookmarks.findIndex(b => b.tid === tid);
+        const now = Date.now();
+        if (idx >= 0) {
+            STATE.bookmarks[idx].type = type;
+            STATE.bookmarks[idx].addedAt = now;
+            STATE.bookmarks[idx].title = title;
+            STATE.bookmarks[idx].url = url;
+        } else {
+            STATE.bookmarks.push({ tid, title, url, type, addedAt: now });
+        }
+        saveState('custom_bookmarks', STATE.bookmarks);
+        if (STATE.bookmarksGistBackupEnabled && STATE.gistToken) {
+            setTimeout(() => gistBookmarksBackup(true), 2000);
+        }
+        return idx >= 0 ? 'updated' : 'added';
+    };
+    const removeBookmark = (tid) => {
+        STATE.bookmarks = STATE.bookmarks.filter(b => b.tid !== tid);
+        saveState('custom_bookmarks', STATE.bookmarks);
+        if (STATE.bookmarksGistBackupEnabled && STATE.gistToken) {
+            setTimeout(() => gistBookmarksBackup(true), 2000);
+        }
+    };
+    const isBookmarked = (tid) => STATE.bookmarks.some(b => b.tid === tid);
+    const getBookmarkType = (tid) => {
+        const b = STATE.bookmarks.find(b => b.tid === tid);
+        return b ? b.type : null;
+    };
 
     const saveState = (key, value) => { GM_setValue(key, value); };
 
@@ -168,6 +222,20 @@
         #custom-115-folder-picker .fp-footer button {
             padding: 6px 16px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px;
         }
+        .custom-persistent-toast {
+            position: fixed; bottom: 80px; right: 60px; z-index: 310000; color: #fff;
+            padding: 10px 14px; border-radius: 6px; font-size: 13px; font-weight: bold;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3); max-width: 520px; min-width: 260px;
+            word-break: break-word; display: flex; align-items: flex-start; gap: 8px;
+            transition: opacity 0.3s; pointer-events: auto;
+        }
+        .custom-persistent-toast .pt-msg { flex: 1; line-height: 1.5; }
+        .custom-persistent-toast .pt-btn {
+            flex-shrink: 0; cursor: pointer; border: 1px solid rgba(255,255,255,0.5);
+            border-radius: 3px; color: #fff; font-size: 12px; padding: 2px 6px;
+            line-height: 1.4; white-space: nowrap;
+        }
+        .custom-persistent-toast .pt-btn:hover { background: rgba(255,255,255,0.2); }
     `);
 
     const tooltip = document.createElement('div');
@@ -178,11 +246,70 @@
     const showToast = (msg, type = 'success') => {
         const toast = document.createElement('div');
         const bg = type === 'success' ? '#52c41a' : type === 'error' ? '#dc3545' : '#1890ff';
-        toast.style.cssText = `position:fixed; bottom:80px; right:60px; z-index:300000; background:${bg}; color:#fff; padding:10px 18px; border-radius:6px; font-size:13px; font-weight:bold; box-shadow:0 4px 12px rgba(0,0,0,0.3); transition:opacity 0.5s;`;
+        toast.style.cssText = `position:fixed; bottom:80px; right:60px; z-index:300000; background:${bg}; color:#fff; padding:10px 18px; border-radius:6px; font-size:13px; font-weight:bold; box-shadow:0 4px 12px rgba(0,0,0,0.3); transition:opacity 0.5s; max-width:480px; word-break:break-word;`;
         toast.innerText = msg;
         document.body.appendChild(toast);
-        setTimeout(() => { toast.style.opacity = '0'; }, 2500);
-        setTimeout(() => { toast.remove(); }, 3000);
+        // 日志类消息显示更久，方便阅读
+        const delay = type === 'info' ? 4000 : 2500;
+        setTimeout(() => { toast.style.opacity = '0'; }, delay);
+        setTimeout(() => { toast.remove(); }, delay + 500);
+    };
+
+    // 持久化 Toast：手动关闭 + 可复制，用于 Gist 备份等关键操作反馈
+    let _persistentToastStack = 0;
+    const showPersistentToast = (msg, type = 'success') => {
+        const bg = type === 'success' ? '#52c41a' : type === 'error' ? '#dc3545' : '#1890ff';
+        const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
+        const toast = document.createElement('div');
+        toast.className = 'custom-persistent-toast';
+        toast.style.background = bg;
+        // 安全构建 DOM，避免 msg 中的 HTML 破坏结构
+        const msgSpan = document.createElement('span');
+        msgSpan.className = 'pt-msg';
+        msgSpan.textContent = icon + ' ' + msg;
+        toast.appendChild(msgSpan);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'pt-btn pt-copy-btn';
+        copyBtn.title = '复制消息内容';
+        copyBtn.style.background = 'transparent';
+        copyBtn.textContent = '📋';
+        toast.appendChild(copyBtn);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'pt-btn pt-close-btn';
+        closeBtn.title = '关闭';
+        closeBtn.style.background = 'transparent';
+        closeBtn.textContent = '✕';
+        toast.appendChild(closeBtn);
+
+        // 多个消息自动错位
+        _persistentToastStack++;
+        const offset = (_persistentToastStack - 1) * 8;
+        toast.style.bottom = (80 + offset) + 'px';
+        toast.style.right = (60 + offset) + 'px';
+
+        // 复制按钮
+        copyBtn.onclick = (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(msg).then(() => showToast('已复制', 'success'));
+        };
+        // 关闭按钮
+        const closeToast = () => {
+            _persistentToastStack--;
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 300);
+        };
+        closeBtn.onclick = (e) => {
+            e.stopPropagation();
+            closeToast();
+        };
+        // 点击消息区域也能关闭
+        toast.addEventListener('click', (e) => {
+            if (e.target === toast || e.target.classList.contains('pt-msg')) closeToast();
+        });
+        document.body.appendChild(toast);
+        return toast;
     };
 
     // ================= 图片灯箱预览 =================
@@ -1221,7 +1348,8 @@
         const isKeywordBlocked = STATE.blocked.some(kw => title.includes(kw));
         const isUserBlocked = STATE.blockedUsers.includes(authorName) || (authorUID && STATE.blockedUsers.includes(authorUID));
         const _tidMatch = url.match(/tid=(\d+)/);
-        const isTidHidden = _tidMatch ? HIDDEN_TID_SET.has('tid=' + _tidMatch[1]) : false;
+        const tidKey = _tidMatch ? 'tid=' + _tidMatch[1] : '';
+        const isTidHidden = tidKey ? (HIDDEN_TID_SET.has(tidKey) && !STATE.tempUnhiddenSet.has(tidKey)) : false;
 
         if (isKeywordBlocked || isUserBlocked || isTidHidden) {
             tbody.classList.add('custom-hidden');
@@ -1268,7 +1396,8 @@
             const isUserBlocked = STATE.blockedUsers.includes(authorName) || (authorUID && STATE.blockedUsers.includes(authorUID));
             const url = link.href;
             const _tidMatch = url.match(/tid=(\d+)/);
-        const isTidHidden = _tidMatch ? HIDDEN_TID_SET.has('tid=' + _tidMatch[1]) : false;
+            const tidKey = _tidMatch ? 'tid=' + _tidMatch[1] : '';
+        const isTidHidden = tidKey ? (HIDDEN_TID_SET.has(tidKey) && !STATE.tempUnhiddenSet.has(tidKey)) : false;
 
             if (isKeywordBlocked || isUserBlocked || isTidHidden) {
                 tbody.classList.add('custom-hidden');
@@ -1299,7 +1428,20 @@
         }
     });
 
-    const threadListContainer = document.querySelector('#threadlisttableid');
+    // 兼容 forumdisplay / guide / 其他列表页的不同容器
+    const threadListContainer = (() => {
+        // 优先匹配 forumdisplay 页的表格
+        let c = document.querySelector('#threadlisttableid');
+        if (c) return c;
+        // guide 等页面：通过 tbody 定位容器
+        const tbody = document.querySelector('tbody[id^="normalthread_"]');
+        if (tbody) {
+            // tbody 的父级 table/div（向上找最近的 table，找不到就用 tbody 的父级）
+            c = tbody.closest('table') || tbody.parentNode;
+            return c;
+        }
+        return null;
+    })();
     if (threadListContainer) {
         observer.observe(threadListContainer, { childList: true, subtree: true });
     }
@@ -1321,6 +1463,18 @@
 
             const nextBtn = doc.querySelector('a.nxt');
             STATE.nextPageUrl = nextBtn ? nextBtn.href : null;
+
+            // 自动全选并提取新加载的帖子（与启动时行为一致）
+            if (STATE.autoExtractOnLoad && newThreads.length > 0) {
+                setTimeout(() => {
+                    // 只选可见帖子，然后触发提取（已提取的会被 extractSingleThread 自动跳过）
+                    document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden) .custom-thread-checkbox').forEach(cb => {
+                        cb.checked = true;
+                    });
+                    const checkedCbs = document.querySelectorAll('.custom-thread-checkbox:checked');
+                    if (checkedCbs.length > 0) btnExtract.click();
+                }, 300);
+            }
         } catch (e) {
             console.error('加载下一页失败', e);
         } finally {
@@ -1333,6 +1487,215 @@
             autoLoadNextPage();
         }
     });
+
+    // ================= 一次性加载多页 =================
+    const bulkLoadPages = async (pageCount) => {
+        if (STATE.isLoadingNextPage) return;
+        STATE.isLoadingNextPage = true;
+
+        let nextUrl = document.querySelector('a.nxt')?.href;
+        if (!nextUrl) {
+            showToast('没有更多页面了', 'error');
+            STATE.isLoadingNextPage = false;
+            return 0;
+        }
+
+        let totalLoaded = 0;
+        let totalSkipped = 0;
+        let pagesLoaded = 0;
+
+        const updateBtnProgress = (text) => {
+            if (typeof btnBulkLoad !== 'undefined' && btnBulkLoad) {
+                btnBulkLoad.innerText = text;
+            }
+        };
+
+        // 从 URL 提取页码
+        const extractPageNum = (url) => {
+            try {
+                const u = new URL(url, location.href);
+                const p = u.searchParams.get('page');
+                if (p) return parseInt(p);
+                const m = u.pathname.match(/[-_](\d+)\.html?$/);
+                if (m) return parseInt(m[1]);
+            } catch(e) {}
+            return null;
+        };
+
+        let firstPageNum = null;
+        let lastPageNum = null;
+        const pageCountNum = pageCount || STATE.bulkLoadPageCount;
+
+        // 推断当前页码（用于分隔线"以上"标注）
+        let currentPageNum = null;
+        const firstNextPage = extractPageNum(nextUrl);
+        if (firstNextPage !== null) {
+            currentPageNum = firstNextPage - 1;
+        } else {
+            // 兜底：从当前页面 URL 提取
+            currentPageNum = extractPageNum(location.href);
+        }
+        let prevPageNum = currentPageNum; // 上一页页码，初始为当前页
+
+        for (let i = 0; i < pageCountNum; i++) {
+            if (!nextUrl) break;
+
+            updateBtnProgress('⏳ 加载中... (' + (i + 1) + '/' + pageCountNum + ')');
+
+            // 从即将 fetch 的 URL 提取真实页码
+            const pageNum = extractPageNum(nextUrl);
+            if (pageNum !== null) {
+                if (firstPageNum === null) firstPageNum = pageNum;
+                lastPageNum = pageNum;
+            }
+
+            try {
+                const res = await fetch(nextUrl);
+                const text = await res.text();
+                const doc = new DOMParser().parseFromString(text, 'text/html');
+
+                let skippedHidden = 0;
+                let loadedThisPage = 0;
+                const newThreads = doc.querySelectorAll('tbody[id^="normalthread_"]');
+
+                newThreads.forEach(tbody => {
+                    const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                    if (link) {
+                        const tidMatch = link.href.match(/tid=(\d+)/);
+                        if (tidMatch && HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
+                            skippedHidden++;
+                            return;
+                        }
+                    }
+                    threadListContainer.appendChild(tbody);
+                    totalLoaded++;
+                    loadedThisPage++;
+                });
+                totalSkipped += skippedHidden;
+                pagesLoaded++;
+
+                // 每页分隔线，"以上为第X页，以下为第Y页"
+                const aboveNum = prevPageNum;
+                const belowNum = pageNum;
+                let sepLabel;
+                if (aboveNum !== null && belowNum !== null) {
+                    sepLabel = '以上为第 ' + aboveNum + ' 页，以下为第 ' + belowNum + ' 页';
+                } else if (belowNum !== null) {
+                    sepLabel = '以下为第 ' + belowNum + ' 页';
+                } else {
+                    sepLabel = '以下为第 ' + pagesLoaded + ' 页';
+                }
+                if (loadedThisPage === 0 && skippedHidden > 0) {
+                    sepLabel += '（全部已隐藏）';
+                }
+
+                const sepTbody = document.createElement('tbody');
+                sepTbody.className = 'custom-page-separator';
+                const sepTr = document.createElement('tr');
+                const sepTd = document.createElement('td');
+                const headerRow = threadListContainer.querySelector('thead th, tbody:first-of-type tr:first-of-type td');
+                const colCount = headerRow ? headerRow.parentElement.children.length : 5;
+                sepTd.colSpan = colCount;
+                sepTd.style.cssText = 'text-align:center; padding:8px 0; font-size:12px; color:#888; background:#f0f0f0; border-top:2px solid #e67e22; border-bottom:2px solid #e67e22;';
+                sepTd.innerText = '── ' + sepLabel + ' ──';
+                sepTr.appendChild(sepTd);
+                sepTbody.appendChild(sepTr);
+                threadListContainer.appendChild(sepTbody);
+
+                // 更新上一页为当前页，供下一轮使用
+                prevPageNum = pageNum;
+
+                if (skippedHidden > 0) {
+                    console.log(sepLabel + ' 跳过已隐藏帖子: ' + skippedHidden + ' 条');
+                }
+
+                const nextBtn = doc.querySelector('a.nxt');
+                nextUrl = nextBtn ? nextBtn.href : null;
+            } catch (e) {
+                console.error('加载第' + (i + 1) + '页失败', e);
+                showToast('加载第 ' + (i + 1) + ' 页失败', 'error');
+                break;
+            }
+        }
+
+        STATE.isLoadingNextPage = false;
+
+        // 底部汇总分隔线
+        if (pagesLoaded > 0) {
+            const nextPageAfter = extractPageNum(nextUrl);
+            let footerLabel;
+            if (firstPageNum !== null && lastPageNum !== null) {
+                if (firstPageNum === lastPageNum) {
+                    footerLabel = '以上第 ' + firstPageNum + ' 页为本次加载内容';
+                } else {
+                    footerLabel = '以上第 ' + firstPageNum + ' - ' + lastPageNum + ' 页为本次加载内容';
+                }
+            } else {
+                footerLabel = '以上 ' + pagesLoaded + ' 页为本次加载内容';
+            }
+            if (nextPageAfter !== null) {
+                footerLabel += '，下一页是第 ' + nextPageAfter + ' 页';
+            } else if (nextUrl) {
+                footerLabel += '，还有更多页面';
+            } else {
+                footerLabel += '，已到最后一页';
+            }
+
+            const footerTbody = document.createElement('tbody');
+            footerTbody.className = 'custom-page-separator custom-page-footer';
+            const footerTr = document.createElement('tr');
+            const footerTd = document.createElement('td');
+            const headerRow = threadListContainer.querySelector('thead th, tbody:first-of-type tr:first-of-type td');
+            const colCount = headerRow ? headerRow.parentElement.children.length : 5;
+            footerTd.colSpan = colCount;
+            footerTd.style.cssText = 'text-align:center; padding:10px 0; font-size:13px; font-weight:bold; color:#e67e22; background:#fff8f0; border-top:3px double #e67e22; border-bottom:3px double #e67e22;';
+            footerTd.innerText = '══ ' + footerLabel + ' ══';
+            footerTr.appendChild(footerTd);
+            footerTbody.appendChild(footerTr);
+            threadListContainer.appendChild(footerTbody);
+        }
+
+        if (totalLoaded > 0) {
+            // 有可见帖子加载
+            STATE.nextPageUrl = nextUrl;
+            const skipMsg = totalSkipped > 0 ? '，跳过 ' + totalSkipped + ' 条已隐藏' : '';
+            showToast('✅ ' + pagesLoaded + ' 页加载完毕，共 ' + totalLoaded + ' 条帖子' + skipMsg, 'success');
+            updateBtnProgress('📄 一次性加载' + STATE.bulkLoadPageCount + '页（自动提取）');
+
+            // 延迟等 DOM 处理完毕，自动全选并提取
+            setTimeout(async () => {
+                document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden) .custom-thread-checkbox').forEach(cb => {
+                    cb.checked = true;
+                });
+                const checkedCbs = document.querySelectorAll('.custom-thread-checkbox:checked');
+                if (checkedCbs.length > 0) {
+                    btnExtract.click();
+                    let waitCount = 0;
+                    while (btnExtract.disabled && waitCount < 240) {
+                        await new Promise(r => setTimeout(r, 500));
+                        waitCount++;
+                    }
+                    showToast('✅ 提取完成', 'success');
+                }
+            }, 600);
+        } else if (pagesLoaded > 0) {
+            // 全部被隐藏，但仍尝试提取当前页可见帖子（兜底）
+            showToast(totalSkipped > 0 ? '没有新帖子（全部 ' + totalSkipped + ' 条已隐藏）' : '没有加载到新帖子', 'info');
+            updateBtnProgress('📄 一次性加载' + STATE.bulkLoadPageCount + '页（自动提取）');
+
+            setTimeout(() => {
+                const visibleCbs = document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden) .custom-thread-checkbox');
+                if (visibleCbs.length > 0) {
+                    visibleCbs.forEach(cb => { cb.checked = true; });
+                    btnExtract.click();
+                }
+            }, 600);
+        } else {
+            showToast('没有更多页面了', 'error');
+        }
+
+        return totalLoaded;
+    };
 
     // ================= 宽屏设置 =================
     const applyResetWidth = () => {
@@ -1371,6 +1734,36 @@
     const panel = document.createElement('div');
     panel.style.cssText = 'position: fixed; bottom: 50px; right: 50px; z-index: 99999; display: flex; flex-direction: column; gap: 10px; align-items: flex-end;';
 
+    // 面板位置应用函数
+    const applyPanelPosition = (pos) => {
+        // 重置之前可能的 transform
+        panel.style.transform = '';
+        switch (pos) {
+            case 'center':
+                panel.style.bottom = 'auto'; panel.style.right = 'auto';
+                panel.style.top = '50%'; panel.style.left = '50%';
+                panel.style.transform = 'translate(-50%, -50%)';
+                panel.style.alignItems = 'center';
+                break;
+            case 'top-left':
+                panel.style.bottom = 'auto'; panel.style.right = 'auto';
+                panel.style.top = '50px'; panel.style.left = '50px';
+                panel.style.alignItems = 'flex-start';
+                break;
+            case 'bottom-right':
+            default:
+                panel.style.top = 'auto'; panel.style.left = 'auto'; panel.style.transform = '';
+                panel.style.bottom = '50px'; panel.style.right = '50px';
+                panel.style.alignItems = 'flex-end';
+                break;
+        }
+        STATE.panelPosition = pos;
+        saveState('custom_panel_position', pos);
+        updateMinBtnPos();
+    };
+    // 应用已保存的面板位置
+    applyPanelPosition(STATE.panelPosition);
+
     const settingsPanel = document.createElement('div');
     settingsPanel.style.cssText = 'display: none; flex-direction: column; gap: 10px; background: white; padding: 15px; border: 1px solid #ccc; border-radius: 5px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 280px;';
 
@@ -1389,6 +1782,17 @@
     toggleSwitch.onchange = (e) => {
         STATE.autoLoadNextPage = e.target.checked;
         saveState('custom_auto_load', STATE.autoLoadNextPage);
+        if (!STATE.autoLoadNextPage) {
+            // 关闭时立即清理状态，截停正在进行的加载
+            STATE.nextPageUrl = null;
+            STATE.isLoadingNextPage = false;
+            showToast('🔄 无缝翻页已关闭（立即生效）', 'info');
+        } else {
+            // 开启时重新获取下一页 URL（可能在浏览过程中页面已变化）
+            const nxt = document.querySelector('a.nxt');
+            STATE.nextPageUrl = nxt ? nxt.href : null;
+            showToast('🔄 无缝翻页已开启，滚动到底部自动加载', 'success');
+        }
     };
 
     toggleRow.appendChild(toggleLabel);
@@ -1415,6 +1819,50 @@
     autoExtractRow.appendChild(autoExtractLabel);
     autoExtractRow.appendChild(autoExtractSwitch);
     settingsPanel.appendChild(autoExtractRow);
+
+    // 启动时面板默认状态
+    const panelStartMinRow = document.createElement('div');
+    panelStartMinRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const panelStartMinLabel = document.createElement('span');
+    panelStartMinLabel.innerText = '📱 启动时默认折叠面板（显示小球）';
+    panelStartMinLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const panelStartMinSwitch = document.createElement('input');
+    panelStartMinSwitch.type = 'checkbox';
+    panelStartMinSwitch.checked = STATE.panelStartMinimized;
+    panelStartMinSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    panelStartMinSwitch.onchange = (e) => {
+        STATE.panelStartMinimized = e.target.checked;
+        saveState('custom_panel_start_minimized', STATE.panelStartMinimized);
+    };
+    panelStartMinRow.appendChild(panelStartMinLabel);
+    panelStartMinRow.appendChild(panelStartMinSwitch);
+    settingsPanel.appendChild(panelStartMinRow);
+
+    // 面板位置设置
+    const panelPosRow = document.createElement('div');
+    panelPosRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const panelPosLabel = document.createElement('span');
+    panelPosLabel.innerText = '📍 控制台面板位置';
+    panelPosLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const panelPosSelect = document.createElement('select');
+    panelPosSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [
+        { value: 'bottom-right', label: '右下角' },
+        { value: 'center', label: '居中显示' },
+        { value: 'top-left', label: '左上角' }
+    ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.innerText = opt.label;
+        if (opt.value === STATE.panelPosition) o.selected = true;
+        panelPosSelect.appendChild(o);
+    });
+    panelPosSelect.onchange = (e) => {
+        applyPanelPosition(e.target.value);
+        showToast('📍 面板位置已切换为：' + panelPosSelect.selectedOptions[0].innerText, 'info');
+    };
+    panelPosRow.appendChild(panelPosLabel);
+    panelPosRow.appendChild(panelPosSelect);
+    settingsPanel.appendChild(panelPosRow);
 
     // 图片数量设置
     const imgCountRow = document.createElement('div');
@@ -1712,6 +2160,51 @@
     resetWidthRow.appendChild(resetWidthUnit);
     settingsPanel.appendChild(resetWidthRow);
 
+    // 一次性加载页数设置
+    const bulkLoadRow = document.createElement('div');
+    bulkLoadRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const bulkLoadLabel = document.createElement('span');
+    bulkLoadLabel.innerText = '📄 一次性加载页数';
+    bulkLoadLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const bulkLoadSelect = document.createElement('select');
+    bulkLoadSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [1, 2, 3, 4, 5].forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n; opt.innerText = n + ' 页';
+        if (n === STATE.bulkLoadPageCount) opt.selected = true;
+        bulkLoadSelect.appendChild(opt);
+    });
+    bulkLoadSelect.onchange = (e) => {
+        STATE.bulkLoadPageCount = parseInt(e.target.value);
+        saveState('custom_bulk_load_count', STATE.bulkLoadPageCount);
+        // 更新按钮文字
+        if (btnBulkLoad) {
+            btnBulkLoad.innerText = '📄 一次性加载' + STATE.bulkLoadPageCount + '页（自动提取）';
+        }
+    };
+    bulkLoadRow.appendChild(bulkLoadLabel);
+    bulkLoadRow.appendChild(bulkLoadSelect);
+    settingsPanel.appendChild(bulkLoadRow);
+
+    // 页面加载时自动执行多页加载开关
+    const autoBulkLoadRow = document.createElement('div');
+    autoBulkLoadRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const autoBulkLoadLabel = document.createElement('span');
+    autoBulkLoadLabel.innerText = '⚡ 页面加载时自动执行多页加载';
+    autoBulkLoadLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const autoBulkLoadSwitch = document.createElement('input');
+    autoBulkLoadSwitch.type = 'checkbox';
+    autoBulkLoadSwitch.checked = STATE.autoBulkLoadOnPageLoad;
+    autoBulkLoadSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    autoBulkLoadSwitch.onchange = (e) => {
+        STATE.autoBulkLoadOnPageLoad = e.target.checked;
+        saveState('custom_auto_bulk_load', STATE.autoBulkLoadOnPageLoad);
+        showToast(e.target.checked ? '⚡ 页面加载时将自动执行多页加载' : '⚡ 已关闭自动多页加载', 'info');
+    };
+    autoBulkLoadRow.appendChild(autoBulkLoadLabel);
+    autoBulkLoadRow.appendChild(autoBulkLoadSwitch);
+    settingsPanel.appendChild(autoBulkLoadRow);
+
     // 隐藏帖子保留天数
     const hideTidsDaysRow = document.createElement('div');
     hideTidsDaysRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
@@ -1852,14 +2345,261 @@
     clearAllBtn.innerText = '⚠️ 清空全部隐藏记录';
     clearAllBtn.style.cssText = 'padding:3px 8px; font-size:11px; cursor:pointer; background:#dc3545; color:#fff; border:1px solid #b02a37; border-radius:3px; font-weight:bold; width:100%;';
     clearAllBtn.onclick = () => {
-        if (!confirm(`确定清空全部 ${STATE.hiddenTids.length} 条隐藏记录？此操作不可撤销。`)) return;
+        if (!confirm(`确定清空全部 ${STATE.hiddenTids.length} 条隐藏记录？此操作不可撤销。\n\n（清除前会自动备份到本地）`)) return;
         if (!confirm(`再次确认：确定清空全部 ${STATE.hiddenTids.length} 条隐藏记录？`)) return;
+        // 清除前自动备份
+        if (STATE.hiddenTids.length > 0) {
+            try {
+                const data = {
+                    version: 1, exportedAt: new Date().toISOString(),
+                    count: STATE.hiddenTids.length, records: STATE.hiddenTids
+                };
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `hidden-tids-backup-before-clear-${new Date().toISOString().slice(0, 10)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch(e) {}
+        }
         clearHiddenTidsByFilter(() => true, '全部');
     };
     clearAllRow.appendChild(clearAllBtn);
     hiddenTidsManageWrap.appendChild(clearAllRow);
 
+    // 4. 备份 / 还原隐藏记录
+    const backupRestoreRow = document.createElement('div');
+    backupRestoreRow.style.cssText = 'display: flex; align-items: center; gap: 4px; margin-top: 6px;';
+
+    const backupBtn = document.createElement('button');
+    backupBtn.type = 'button';
+    backupBtn.innerText = '💾 备份';
+    backupBtn.title = '将隐藏记录导出为 JSON 文件保存到本地';
+    backupBtn.style.cssText = 'flex:1; padding:3px 6px; font-size:11px; cursor:pointer; background:#17a2b8; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+    backupBtn.onclick = () => {
+        if (STATE.hiddenTids.length === 0) { showToast('没有可备份的记录', 'error'); return; }
+        const data = {
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            count: STATE.hiddenTids.length,
+            records: STATE.hiddenTids
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const ts = new Date().toISOString().slice(0, 10);
+        a.download = `hidden-tids-backup-${ts}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast(`💾 已备份 ${STATE.hiddenTids.length} 条记录`, 'success');
+    };
+    backupRestoreRow.appendChild(backupBtn);
+
+    const restoreBtn = document.createElement('button');
+    restoreBtn.type = 'button';
+    restoreBtn.innerText = '📥 还原';
+    restoreBtn.title = '从本地 JSON 备份文件还原隐藏记录（会合并到现有记录）';
+    restoreBtn.style.cssText = 'flex:1; padding:3px 6px; font-size:11px; cursor:pointer; background:#6f42c1; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+    restoreBtn.onclick = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.style.display = 'none';
+        input.onchange = () => {
+            const file = input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                try {
+                    const data = JSON.parse(ev.target.result);
+                    if (!data.records || !Array.isArray(data.records)) {
+                        showToast('备份文件格式无效', 'error');
+                        return;
+                    }
+                    const count = data.count || data.records.length;
+                    if (!confirm(`即将从备份还原 ${count} 条记录（合并到现有 ${STATE.hiddenTids.length} 条），确定继续？`)) return;
+
+                    let added = 0;
+                    const now = Date.now();
+                    for (const entry of data.records) {
+                        const tid = Array.isArray(entry) ? entry[0] : entry;
+                        const ts = (Array.isArray(entry) && entry[1]) ? entry[1] : now;
+                        const key = 'tid=' + tid;
+                        if (!HIDDEN_TID_SET.has(key)) {
+                            HIDDEN_TID_SET.add(key);
+                            STATE.hiddenTids.push([tid, ts]);
+                            added++;
+                        }
+                    }
+                    saveState('custom_hidden_tids', STATE.hiddenTids);
+                    updateHiddenTidsTitle();
+                    reapplyFilters();
+                    showToast(`📥 已还原 ${added} 条记录（跳过 ${count - added} 条重复）`, 'success');
+                } catch (err) {
+                    showToast(`还原失败: ${err.message}`, 'error');
+                }
+            };
+            reader.readAsText(file);
+            input.remove();
+        };
+        document.body.appendChild(input);
+        input.click();
+    };
+    backupRestoreRow.appendChild(restoreBtn);
+    hiddenTidsManageWrap.appendChild(backupRestoreRow);
+
     settingsPanel.appendChild(hiddenTidsManageWrap);
+
+    // ================= GitHub Gist 云备份设置 =================
+    const gistBackupWrap = document.createElement('div');
+    gistBackupWrap.style.cssText = 'padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+
+    const gistTitle = document.createElement('div');
+    gistTitle.style.cssText = 'font-weight:bold; font-size:13px; margin-bottom:4px;';
+    gistTitle.innerText = '☁️ GitHub Gist 云备份';
+    gistBackupWrap.appendChild(gistTitle);
+
+    const gistNote = document.createElement('div');
+    gistNote.style.cssText = 'font-size:10px; color:#888; margin-bottom:4px;';
+    gistNote.innerText = 'GitHub Token 获取: https://github.com/settings/tokens → Generate new token (classic) → 勾选 gist → 生成后粘贴到上方';
+    gistBackupWrap.appendChild(gistNote);
+
+    // Token 输入
+    const gistTokenRow = document.createElement('div');
+    gistTokenRow.style.cssText = 'display: flex; gap: 4px; margin-bottom: 6px;';
+    const gistTokenInput = document.createElement('input');
+    gistTokenInput.type = 'password';
+    gistTokenInput.value = STATE.gistToken;
+    gistTokenInput.placeholder = 'GitHub Personal Access Token';
+    gistTokenInput.style.cssText = 'flex:1; padding:3px 5px; font-size:11px; border:1px solid #ccc; border-radius:3px;';
+    let _lastSavedToken = STATE.gistToken;
+    gistTokenInput.addEventListener('input', () => {
+        STATE.gistToken = gistTokenInput.value.trim();
+        saveState('custom_gist_token', STATE.gistToken);
+    });
+    gistTokenInput.addEventListener('blur', () => {
+        // Token 变化时清除旧 gist ID，下次备份会创建新 gist
+        if (STATE.gistToken && STATE.gistToken !== _lastSavedToken) {
+            _lastSavedToken = STATE.gistToken;
+            if (STATE.gistId) {
+                STATE.gistId = '';
+                saveState('custom_gist_id', '');
+            }
+        }
+    });
+    gistTokenRow.appendChild(gistTokenInput);
+    const gistTestBtn = document.createElement('button');
+    gistTestBtn.type = 'button';
+    gistTestBtn.innerText = '测试';
+    gistTestBtn.style.cssText = 'padding:2px 6px; font-size:10px; cursor:pointer; background:#17a2b8; color:#fff; border:none; border-radius:3px; white-space:nowrap;';
+    gistTestBtn.onclick = () => gistTestToken();
+    gistTokenRow.appendChild(gistTestBtn);
+    gistBackupWrap.appendChild(gistTokenRow);
+
+    // Gist ID 输入（跨设备还原时手动填入）
+    const gistIdRow = document.createElement('div');
+    gistIdRow.style.cssText = 'display: flex; gap: 4px; margin-bottom: 6px;';
+    const gistIdInput = document.createElement('input');
+    gistIdInput.type = 'text';
+    gistIdInput.value = STATE.gistId;
+    gistIdInput.placeholder = 'Gist ID（留空自动创建，跨设备还原时填入）';
+    gistIdInput.style.cssText = 'flex:1; padding:3px 5px; font-size:11px; border:1px solid #ccc; border-radius:3px; font-family:monospace;';
+    gistIdInput.addEventListener('input', () => {
+        STATE.gistId = gistIdInput.value.trim();
+        saveState('custom_gist_id', STATE.gistId);
+    });
+    gistIdRow.appendChild(gistIdInput);
+    const gistIdSearchBtn = document.createElement('button');
+    gistIdSearchBtn.type = 'button';
+    gistIdSearchBtn.innerText = '🔍';
+    gistIdSearchBtn.title = '搜索已有备份 Gist（根据 Token 自动查找）';
+    gistIdSearchBtn.style.cssText = 'padding:2px 6px; font-size:10px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:3px; white-space:nowrap;';
+    gistIdSearchBtn.onclick = async () => {
+        if (!STATE.gistToken) { showToast('请先设置 Token', 'error'); return; }
+        gistIdSearchBtn.disabled = true;
+        gistIdSearchBtn.innerText = '⏳';
+        try {
+            // 尝试查找包含 hidden-tids.json 或 bookmarks.json 的 Gist
+            let foundId = await gistFindByFilename('hidden-tids.json');
+            if (!foundId) foundId = await gistFindByFilename('bookmarks.json');
+            if (foundId) {
+                STATE.gistId = foundId;
+                saveState('custom_gist_id', foundId);
+                gistIdInput.value = foundId;
+                showPersistentToast('✅ 找到备份 Gist: ' + foundId.slice(0, 10) + '...\n完整 ID: ' + foundId, 'success');
+            } else {
+                showPersistentToast('未找到已有备份 Gist，请先在此设备执行一次备份', 'info');
+            }
+        } catch (e) {
+            showPersistentToast('搜索失败: ' + e.message, 'error');
+        }
+        gistIdSearchBtn.disabled = false;
+        gistIdSearchBtn.innerText = '🔍';
+    };
+    gistIdRow.appendChild(gistIdSearchBtn);
+    gistBackupWrap.appendChild(gistIdRow);
+
+    // 自动备份开关
+    const gistAutoRow = document.createElement('div');
+    gistAutoRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;';
+    const gistAutoLabel = document.createElement('span');
+    gistAutoLabel.innerText = '新增隐藏时自动备份到 Gist';
+    gistAutoLabel.style.cssText = 'font-size: 11px; color: #555;';
+    const gistAutoSwitch = document.createElement('input');
+    gistAutoSwitch.type = 'checkbox';
+    gistAutoSwitch.checked = STATE.gistBackupEnabled;
+    gistAutoSwitch.style.cssText = 'cursor: pointer; width: 14px; height: 14px;';
+    gistAutoSwitch.onchange = (e) => {
+        STATE.gistBackupEnabled = e.target.checked;
+        saveState('custom_gist_backup_enabled', STATE.gistBackupEnabled);
+    };
+    gistAutoRow.appendChild(gistAutoLabel);
+    gistAutoRow.appendChild(gistAutoSwitch);
+    gistBackupWrap.appendChild(gistAutoRow);
+
+    // 手动备份按钮 - 第一行
+    const gistBtnRow1 = document.createElement('div');
+    gistBtnRow1.style.cssText = 'display: flex; gap: 4px; margin-bottom: 4px;';
+    const gistBackupBtn = document.createElement('button');
+    gistBackupBtn.type = 'button';
+    gistBackupBtn.innerText = '☁️ 备份记录';
+    gistBackupBtn.style.cssText = 'flex:1; padding:3px 6px; font-size:11px; cursor:pointer; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+    gistBackupBtn.onclick = () => gistBackup();
+    gistBtnRow1.appendChild(gistBackupBtn);
+
+    const gistRestoreBtn = document.createElement('button');
+    gistRestoreBtn.type = 'button';
+    gistRestoreBtn.innerText = '📥 还原记录';
+    gistRestoreBtn.style.cssText = 'flex:1; padding:3px 6px; font-size:11px; cursor:pointer; background:#6f42c1; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+    gistRestoreBtn.onclick = () => gistRestore();
+    gistBtnRow1.appendChild(gistRestoreBtn);
+    gistBackupWrap.appendChild(gistBtnRow1);
+
+    // 第二行 - 设置备份/还原
+    const gistBtnRow2 = document.createElement('div');
+    gistBtnRow2.style.cssText = 'display: flex; gap: 4px;';
+    const gistBackupSettingsBtn = document.createElement('button');
+    gistBackupSettingsBtn.type = 'button';
+    gistBackupSettingsBtn.innerText = '⚙️ 备份设置';
+    gistBackupSettingsBtn.style.cssText = 'flex:1; padding:3px 6px; font-size:11px; cursor:pointer; background:#17a2b8; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+    gistBackupSettingsBtn.onclick = () => gistBackupSettings();
+    gistBtnRow2.appendChild(gistBackupSettingsBtn);
+
+    const gistRestoreSettingsBtn = document.createElement('button');
+    gistRestoreSettingsBtn.type = 'button';
+    gistRestoreSettingsBtn.innerText = '📥 还原设置';
+    gistRestoreSettingsBtn.style.cssText = 'flex:1; padding:3px 6px; font-size:11px; cursor:pointer; background:#6f42c1; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+    gistRestoreSettingsBtn.onclick = () => gistRestoreSettings();
+    gistBtnRow2.appendChild(gistRestoreSettingsBtn);
+    gistBackupWrap.appendChild(gistBtnRow2);
+
+    settingsPanel.appendChild(gistBackupWrap);
 
     // 永久隐藏帖子按钮（放在 btnGroup 主面板，不在设置里）
 
@@ -1887,6 +2627,31 @@
     logMaxRow.appendChild(logMaxLabel);
     logMaxRow.appendChild(logMaxSelect);
     settingsPanel.appendChild(logMaxRow);
+
+    // 滚动小球速度设置
+    const scrollBallRow = document.createElement('div');
+    scrollBallRow.style.cssText = 'padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    scrollBallRow.innerHTML = '<div style="font-weight:bold; font-size:13px; margin-bottom:6px;">🔽 滚动小球速度设置</div>';
+    const makeSpeedRow = (label, key, defVal, opts) => {
+        const r = document.createElement('div');
+        r.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;';
+        const lbl = document.createElement('span');
+        lbl.style.cssText = 'font-size:11px; color:#555;';
+        lbl.innerText = label;
+        r.appendChild(lbl);
+        const sel = document.createElement('select');
+        sel.style.cssText = 'cursor:pointer; font-size:11px; padding:2px;';
+        opts.forEach(o => { const opt = document.createElement('option'); opt.value = o; opt.innerText = o + ' px/s'; if (STATE[key] === o) opt.selected = true; sel.appendChild(opt); });
+        sel.onchange = (e) => { STATE[key] = parseInt(e.target.value); saveState(key, STATE[key]); };
+        r.appendChild(sel);
+        return r;
+    };
+    scrollBallRow.appendChild(makeSpeedRow('点击速度 1x', 'scrollSpeed1', 80, [40, 60, 80, 100, 120, 160, 200]));
+    scrollBallRow.appendChild(makeSpeedRow('点击速度 2x', 'scrollSpeed2', 200, [120, 160, 200, 250, 300, 400, 500]));
+    scrollBallRow.appendChild(makeSpeedRow('点击速度 3x', 'scrollSpeed3', 400, [250, 300, 400, 500, 600, 800, 1000]));
+    scrollBallRow.appendChild(makeSpeedRow('拖拽最大速度', 'scrollMaxSpeed', 600, [300, 400, 500, 600, 800, 1000, 1500]));
+    scrollBallRow.appendChild(makeSpeedRow('拖拽灵敏度', 'scrollSensitivity', 2, [1, 2, 3, 4, 5, 7, 10]));
+    settingsPanel.appendChild(scrollBallRow);
 
     const createKeywordManager = (titleText, stateArray, stateKey, placeholderText = '输入关键词') => {
         const wrap = document.createElement('div');
@@ -1946,7 +2711,7 @@
     };
 
     const btnToggleSet = createBtn('⚙️ 脚本设置', '#6c757d');
-    btnToggleSet.onclick = () => settingsPanel.style.display = settingsPanel.style.display === 'none' ? 'flex' : 'none';
+    btnToggleSet.onclick = () => showDashboard('settings');
 
     const btnSelectAll = createBtn('全选 / 取消全选', '#28a745');
     let isAllSelected = false;
@@ -1975,7 +2740,7 @@
 
         const box = document.createElement('div');
         box.className = 'custom-extracted';
-        box.style.cssText = 'margin-top:10px; padding-left:25px; display:flex; flex-direction:column; gap:8px;';
+        box.style.cssText = 'margin-top:10px; padding-left:25px; display:flex; flex-direction:column; gap:8px; max-width:100%; overflow:hidden; box-sizing:border-box;';
 
         // ---- 图片 ----
         if (data.images.length > 0) {
@@ -2193,6 +2958,55 @@
             box.appendChild(lockedWrap);
         }
 
+        // ---- 收藏按钮（列表页提取区，位于图片下方、链接上方） ----
+        (() => {
+            const _bmTid = (threadUrl.match(/tid=(\d+)/) || [])[1];
+            if (_bmTid) {
+                const _bmTitle = (() => {
+                    const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                    return link ? link.innerText.trim() : threadUrl;
+                })();
+                const bmRow = document.createElement('div');
+                bmRow.style.cssText = 'display:flex; gap:6px; margin-top:8px; max-width:100%; min-width:0;';
+                const _mkBmBtn = (type, label, bgColor) => {
+                    const _curType = getBookmarkType(_bmTid);
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.innerText = label;
+                    btn.style.cssText = `flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.55'}; transition:opacity 0.15s; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;`;
+                    btn.onmouseover = () => { btn.style.opacity = '1'; };
+                    btn.onmouseout = () => { if (getBookmarkType(_bmTid) !== type) btn.style.opacity = '0.55'; };
+                    btn.onclick = (ev) => {
+                        ev.preventDefault(); ev.stopPropagation();
+                        if (isBookmarked(_bmTid) && getBookmarkType(_bmTid) === type) {
+                            removeBookmark(_bmTid);
+                            showToast('已取消收藏', 'info');
+                            bmRow.querySelectorAll('button').forEach(b => { b.style.opacity = '0.55'; });
+                        } else {
+                            const result = addBookmark(_bmTid, _bmTitle, threadUrl, type);
+                            showToast(result === 'updated' ? `已更新收藏为${type === 'important' ? '重要' : '一般'}` : `已收藏为${type === 'important' ? '重要⭐' : '一般📌'}`, 'success');
+                            bmRow.querySelectorAll('button').forEach(b => { b.style.opacity = b.dataset.bmType === type ? '1' : '0.55'; });
+                        }
+                        updateListBmBtns();
+                    };
+                    btn.dataset.bmType = type;
+                    return btn;
+                };
+                bmRow.appendChild(_mkBmBtn('important', '⭐ 收藏为重要帖子', '#dc3545'));
+                bmRow.appendChild(_mkBmBtn('normal', '📌 收藏为一般帖子', '#007bff'));
+                const openThreadBtn = document.createElement('button');
+                openThreadBtn.type = 'button';
+                openThreadBtn.innerText = '📂 打开帖子';
+                openThreadBtn.style.cssText = 'padding:12px 14px; font-size:14px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:nowrap; flex-shrink:0;';
+                openThreadBtn.onclick = (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    GM_openInTab(threadUrl, { active: false, insert: true });
+                };
+                bmRow.appendChild(openThreadBtn);
+                box.appendChild(bmRow);
+            }
+        })();
+
         // ---- 资源链接：磁力/ed2k/种子合并为一个文本框 ----
         const allLinks = [];
 
@@ -2323,13 +3137,13 @@
 
                 const linkCopyBtn = document.createElement('button');
                 linkCopyBtn.type = 'button'; linkCopyBtn.innerText = '复制全部';
-                linkCopyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px;';
+                linkCopyBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 12px; background:#6c757d; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 linkCopyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(linkContent).then(() => { linkCopyBtn.innerText = '已复制'; setTimeout(() => linkCopyBtn.innerText = '复制全部', 2000); }); };
                 linkBtnRow.appendChild(linkCopyBtn);
 
                 const pushAllBtn = document.createElement('button');
                 pushAllBtn.type = 'button'; pushAllBtn.innerText = '☁️ 一键推送全部';
-                pushAllBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                pushAllBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 24px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 pushAllBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); pushLinksTo115(everyLink, pushAllBtn); };
                 linkBtnRow.appendChild(pushAllBtn);
 
@@ -2349,13 +3163,13 @@
 
                     const lineCopyBtn = document.createElement('button');
                     lineCopyBtn.type = 'button'; lineCopyBtn.innerText = '复制';
-                    lineCopyBtn.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#6c757d; color:#fff; border:none; border-radius:2px; flex-shrink:0;';
+                    lineCopyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px; flex-shrink:0; font-weight:bold;';
                     lineCopyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(link).then(() => { lineCopyBtn.innerText = '已复制'; setTimeout(() => lineCopyBtn.innerText = '复制', 1500); }); };
                     lineDiv.appendChild(lineCopyBtn);
 
                     const linePushBtn = document.createElement('button');
                     linePushBtn.type = 'button'; linePushBtn.innerText = '☁️';
-                    linePushBtn.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#fd7e14; color:#fff; border:none; border-radius:2px; flex-shrink:0;';
+                     linePushBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:2px 16px; background:#fd7e14; color:#fff; border:none; border-radius:3px; flex-shrink:0; font-weight:bold;';
                     linePushBtn.title = '推送到115';
                     linePushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); pushLinksTo115([link], linePushBtn); };
                     lineDiv.appendChild(linePushBtn);
@@ -2367,7 +3181,7 @@
                 if (everyLink.length > 10) {
                     const linkToggle = document.createElement('button');
                     linkToggle.type = 'button'; linkToggle.innerText = '展开全文';
-                    linkToggle.style.cssText = 'font-size:11px; margin-top:4px; cursor:pointer; padding:2px 8px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
+                    linkToggle.style.cssText = 'font-size:12px; margin-top:4px; cursor:pointer; padding:4px 12px; background:#e9ecef; border:1px solid #ccc; border-radius:3px; font-weight:bold;';
                     linkToggle.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (linkListDiv.style.maxHeight === '200px') { linkListDiv.style.maxHeight = 'none'; linkToggle.innerText = '收起'; } else { linkListDiv.style.maxHeight = '200px'; linkToggle.innerText = '展开全文'; } };
                     linkWrap.appendChild(linkToggle);
                 }
@@ -2389,7 +3203,7 @@
 
                 const copyBtn = document.createElement('button');
                 copyBtn.type = 'button'; copyBtn.innerText = '复制全文';
-                copyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px;';
+                copyBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 12px; background:#6c757d; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 copyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(mergedContent).then(() => { copyBtn.innerText = '已复制'; setTimeout(() => copyBtn.innerText = '复制全文', 2000); }); };
                 txtHeader.appendChild(copyBtn);
                 txtWrap.appendChild(txtHeader);
@@ -2402,7 +3216,7 @@
                 if (mergedContent.length > 500) {
                     const toggleBtn = document.createElement('button');
                     toggleBtn.type = 'button'; toggleBtn.innerText = '展开全文';
-                    toggleBtn.style.cssText = 'font-size:11px; margin-top:4px; cursor:pointer; padding:2px 8px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
+                    toggleBtn.style.cssText = 'font-size:12px; margin-top:4px; cursor:pointer; padding:4px 12px; background:#e9ecef; border:1px solid #ccc; border-radius:3px; font-weight:bold;';
                     toggleBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (pre.style.maxHeight === '200px') { pre.style.maxHeight = 'none'; toggleBtn.innerText = '收起'; } else { pre.style.maxHeight = '200px'; toggleBtn.innerText = '展开全文'; } };
                     txtWrap.appendChild(toggleBtn);
                 }
@@ -2861,48 +3675,505 @@
         // await offline115AutoRename(targetCid, (msg) => { logEl.innerText += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; });
     };
 
+    // ================= GitHub Gist 云备份 =================
+    const gistApi = (method, path, body) => new Promise((resolve, reject) => {
+        if (!STATE.gistToken) { reject(new Error('请先设置 GitHub Token')); return; }
+        const opts = {
+            method, url: 'https://api.github.com' + path,
+            headers: {
+                'Authorization': 'Bearer ' + STATE.gistToken,
+                'Accept': 'application/vnd.github+json'
+            },
+            timeout: 60000,
+            onload: (r) => {
+                console.log('[gistApi] ' + method + ' ' + path + ' -> HTTP ' + r.status + ' (' + (r.responseText ? r.responseText.length : 0) + ' bytes)');
+                if (r.status >= 200 && r.status < 300) {
+                    try { resolve(JSON.parse(r.responseText)); } catch(e) { resolve(r.responseText); }
+                } else if (r.status === 401) {
+                    reject(new Error('Token 无效或已过期'));
+                } else if (r.status === 404) {
+                    reject(new Error('Gist 不存在或已被删除'));
+                } else if (r.status === 403) {
+                    reject(new Error('API 限流，请稍后再试'));
+                } else {
+                    try {
+                        const err = JSON.parse(r.responseText);
+                        reject(new Error(err.message || 'HTTP ' + r.status));
+                    } catch(e) {
+                        // responseText 可能是 HTML，提取有意义的部分
+                        const raw = r.responseText || '';
+                        // 先尝试从 HTML 中提取 title
+                        const titleMatch = raw.match(/<title>([^<]+)<\/title>/);
+                        const clean = titleMatch ? titleMatch[1] : raw.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+                        reject(new Error('HTTP ' + r.status + (clean ? ': ' + clean : ' (请求格式可能有误，body=' + (opts.data ? opts.data.length : 0) + ' bytes)')));
+                    }
+                }
+            },
+            onerror: (err) => { console.error('[gistApi] 网络错误:', method, path, err); reject(new Error('网络错误，请检查网络连接')); },
+            ontimeout: () => { console.error('[gistApi] 超时:', method, path); reject(new Error('请求超时（60s），请检查网络或尝试刷新页面后重试')); }
+        };
+        if (body) {
+            opts.data = JSON.stringify(body);
+            // 必须手动设置 Content-Type: application/json，否则 TM 会默认 application/x-www-form-urlencoded
+            opts.headers['Content-Type'] = 'application/json; charset=utf-8';
+        }
+        console.log('[gistApi] 发送', method, path, body ? '(' + JSON.stringify(body).length + ' bytes body)' : '');
+        GM_xmlhttpRequest(opts);
+    });
+
+    // 辅助：搜索用户的 Gist 列表，找到包含指定文件名的 Gist ID
+    const gistFindByFilename = async (filename) => {
+        let page = 1;
+        while (page <= 5) { // 最多搜索5页
+            const gists = await gistApi('GET', `/gists?per_page=100&page=${page}`);
+            if (!Array.isArray(gists) || gists.length === 0) break;
+            for (const g of gists) {
+                if (g.files && g.files[filename]) return g.id;
+            }
+            if (gists.length < 100) break;
+            page++;
+        }
+        return null;
+    };
+
+    // 统一 Gist 更新：构建所有文件并从本地状态一次 PATCH，无需预先 GET
+    // fileNames: 可选，指定本次要更新的文件名列表（PATCH 时只更新这些文件，避免覆盖无关数据）
+    //            不传或传空数组则更新全部文件；POST 创建时始终包含全部文件
+    const gistSyncAll = async (label, silent, fileNames) => {
+        // 1) 构建所有文件内容（注意：大数组不放入 script-settings.json，避免超 1MB 限制）
+        const buildAllFiles = () => {
+            const files = {};
+            // hidden-tids.json
+            const htData = { version: 1, exportedAt: new Date().toISOString(), count: STATE.hiddenTids.length, records: STATE.hiddenTids };
+            files['hidden-tids.json'] = { content: JSON.stringify(htData) };
+            // bookmarks.json
+            const bmData = { version: 1, exportedAt: new Date().toISOString(), count: STATE.bookmarks.length, records: STATE.bookmarks };
+            files['bookmarks.json'] = { content: JSON.stringify(bmData) };
+            // script-settings.json（排除大数组，它们已在各自文件中）
+            const settings = {};
+            const _largeKeys = ['threadCache', 'isLoadingNextPage', 'nextPageUrl', 'panelMinimized',
+                'gistToken', 'gistId', 'bookmarks', 'bookmarksGistBackupEnabled', 'bookmarksPanelActiveTab',
+                'hiddenTids', 'blocked', 'blockedUsers', 'highlighted', 'readLinks',
+                'offline115Favorites', 'offline115RenameRules'];
+            for (const [k, v] of Object.entries(STATE)) {
+                if (_largeKeys.includes(k)) continue;
+                settings[k] = v;
+            }
+            const ssData = { version: 1, exportedAt: new Date().toISOString(), settings };
+            files['script-settings.json'] = { content: JSON.stringify(ssData) };
+            return files;
+        };
+
+        const ts = new Date().toISOString().slice(0, 19);
+        const allFiles = buildAllFiles();
+
+        if (STATE.gistId) {
+            // PATCH 时只更新指定的文件，防止覆盖其他类型的云数据
+            // 例如：收藏夹备份只更新 bookmarks.json，不影响 hidden-tids.json
+            const patchFiles = (fileNames && fileNames.length > 0)
+                ? Object.fromEntries(Object.entries(allFiles).filter(([k]) => fileNames.includes(k)))
+                : allFiles;
+
+            // 尝试直接 PATCH 更新（一次请求，无需预先 GET）
+            const t = label ? showPersistentToast('☁️ 正在更新 Gist (' + STATE.gistId.slice(0, 8) + ')...', 'info') : null;
+            try {
+                await gistApi('PATCH', '/gists/' + STATE.gistId, {
+                    description: '论坛脚本备份（更新于 ' + ts + '）',
+                    files: patchFiles
+                });
+                if (t) { t.querySelector('.pt-msg').textContent = label; t.style.background = '#52c41a'; }
+                return;
+            } catch (patchErr) {
+                console.warn('[gistSyncAll] PATCH 失败:', patchErr.message);
+                const isDeleted = patchErr.message.includes('不存在') || patchErr.message.includes('404');
+                if (isDeleted) {
+                    STATE.gistId = '';
+                    saveState('custom_gist_id', '');
+                    if (t) t.querySelector('.pt-msg').textContent = '⚠️ Gist 已被删除，正在重建...';
+                } else {
+                    // 超时等网络问题 → 直接报错，不创建新 Gist（避免重复）
+                    if (t) { t.querySelector('.pt-msg').textContent = '❌ 更新超时：' + patchErr.message; t.style.background = '#dc3545'; }
+                    throw patchErr;
+                }
+            }
+        }
+
+        // 2) 无 gistId 或已被删除 → 创建新 Gist（始终包含全部文件）
+        try {
+            const result = await gistApi('POST', '/gists', {
+                description: '论坛脚本备份',
+                public: false,
+                files: allFiles
+            });
+            STATE.gistId = result.id;
+            saveState('custom_gist_id', STATE.gistId);
+            if (!silent) showPersistentToast('✅ ☁️ 已创建 Gist（' + STATE.gistId.slice(0, 8) + '...）' + (label ? ' — ' + label : ''), 'success');
+        } catch (createErr) {
+            throw new Error('创建 Gist 失败: ' + createErr.message);
+        }
+    };
+
+    // 备份到 Gist（隐藏记录）
+    const gistBackup = async () => {
+        if (!STATE.gistToken) { showPersistentToast('请先在设置中填写 GitHub Token', 'error'); return; }
+        try {
+            await gistSyncAll('✅ ☁️ 已更新 Gist（' + STATE.hiddenTids.length + ' 条记录）', false, ['hidden-tids.json']);
+        } catch (e) {
+            showPersistentToast('❌ ☁️ Gist 备份失败: ' + e.message, 'error');
+        }
+    };
+
+    // 从 Gist 还原隐藏记录
+    const gistRestore = async () => {
+        if (!STATE.gistToken) { showPersistentToast('请先设置 Token', 'error'); return; }
+        try {
+            let gistId = STATE.gistId;
+            if (!gistId) {
+                showPersistentToast('🔍 正在搜索备份 Gist...', 'info');
+                gistId = await gistFindByFilename('hidden-tids.json');
+                if (!gistId) { showPersistentToast('未找到已有备份 Gist，请先在设置中填入 Gist ID 或执行一次备份', 'error'); return; }
+                STATE.gistId = gistId;
+                saveState('custom_gist_id', gistId);
+            }
+            const gist = await gistApi('GET', '/gists/' + gistId);
+            const file = gist.files && gist.files['hidden-tids.json'];
+            if (!file || !file.content) { showPersistentToast('Gist 中未找到备份文件', 'error'); return; }
+            const data = JSON.parse(file.content);
+            if (!data.records || !Array.isArray(data.records)) { showPersistentToast('备份数据格式无效', 'error'); return; }
+            if (!confirm(`即将从 Gist 还原 ${data.records.length} 条记录（合并到现有 ${STATE.hiddenTids.length} 条），确定继续？`)) return;
+
+            let added = 0;
+            const now = Date.now();
+            for (const entry of data.records) {
+                const tid = Array.isArray(entry) ? entry[0] : entry;
+                const ts = (Array.isArray(entry) && entry[1]) ? entry[1] : now;
+                const key = 'tid=' + tid;
+                if (!HIDDEN_TID_SET.has(key)) {
+                    HIDDEN_TID_SET.add(key);
+                    STATE.hiddenTids.push([tid, ts]);
+                    added++;
+                }
+            }
+            saveState('custom_hidden_tids', STATE.hiddenTids);
+            updateHiddenTidsTitle();
+            reapplyFilters();
+            showPersistentToast('📥 已从 Gist 还原 ' + added + ' 条记录（跳过 ' + (data.records.length - added) + ' 条重复）', 'success');
+        } catch (e) {
+            showPersistentToast('❌ Gist 还原失败: ' + e.message, 'error');
+        }
+    };
+
+    // 备份脚本设置到 Gist
+    const gistBackupSettings = async () => {
+        if (!STATE.gistToken) { showPersistentToast('请先设置 Token', 'error'); return; }
+        try {
+            await gistSyncAll('✅ ☁️ 已备份脚本设置到 Gist', false, ['script-settings.json']);
+        } catch (e) {
+            showPersistentToast('❌ ☁️ 设置备份失败: ' + e.message, 'error');
+        }
+    };
+
+    // 从 Gist 还原脚本设置
+    const gistRestoreSettings = async () => {
+        if (!STATE.gistToken) { showPersistentToast('请先设置 Token', 'error'); return; }
+        try {
+            let gistId = STATE.gistId;
+            if (!gistId) {
+                showPersistentToast('🔍 正在搜索备份 Gist...', 'info');
+                gistId = await gistFindByFilename('script-settings.json') || await gistFindByFilename('hidden-tids.json');
+                if (!gistId) { showPersistentToast('未找到已有备份 Gist', 'error'); return; }
+                STATE.gistId = gistId;
+                saveState('custom_gist_id', gistId);
+            }
+            const gist = await gistApi('GET', '/gists/' + gistId);
+            const file = gist.files && gist.files['script-settings.json'];
+            if (!file || !file.content) { showPersistentToast('Gist 中未找到设置备份文件', 'error'); return; }
+            const data = JSON.parse(file.content);
+            if (!data.settings) { showPersistentToast('设置备份数据格式无效', 'error'); return; }
+            if (!confirm('即将从 Gist 还原脚本设置，确定继续？')) return;
+
+            const ignoreKeys = ['threadCache', 'isLoadingNextPage', 'nextPageUrl', 'panelMinimized', 'gistToken', 'gistId', 'bookmarks', 'bookmarksGistBackupEnabled', 'bookmarksPanelActiveTab'];
+            for (const [k, v] of Object.entries(data.settings)) {
+                if (ignoreKeys.includes(k)) continue;
+                STATE[k] = v;
+                saveState(convertStateKey(k), v);
+            }
+            showPersistentToast('📥 已从 Gist 还原脚本设置，刷新后生效', 'success');
+        } catch (e) {
+            showPersistentToast('❌ 设置还原失败: ' + e.message, 'error');
+        }
+    };
+
+    // 反向映射 STATE key 到 GM_setValue key
+    const convertStateKey = (k) => {
+        const map = {
+            blocked: 'custom_blocked_keywords', blockedUsers: 'custom_blocked_users',
+            highlighted: 'custom_highlight_keywords', readLinks: 'custom_read_links',
+            autoLoadNextPage: 'custom_auto_load', autoExtractOnLoad: 'custom_auto_extract',
+            imageCount: 'custom_image_count', imageSize: 'custom_image_size',
+            concurrentEnabled: 'custom_concurrent_enabled', concurrentCount: 'custom_concurrent_count',
+            concurrentDelay: 'custom_concurrent_delay',
+            offline115Cid: 'offline_115_cid', offline115CidName: 'offline_115_cid_name',
+            offline115AutoOpen: 'offline_115_auto_open', offline115Favorites: 'offline_115_favorites',
+            offline115FavMax: 'offline_115_fav_max', lightboxCenterRatio: 'custom_lightbox_center',
+            offline115NewFolder: 'offline_115_new_folder', offline115Urls: 'offline_115_urls',
+            offline115RenameRules: 'offline_115_rename_rules', offline115LogMaxLines: 'offline_115_log_max',
+            quickReplyText: 'custom_quick_reply_text', resetWidth: 'custom_reset_width',
+            resetWidthPx: 'custom_reset_width_px', hiddenTids: 'custom_hidden_tids',
+            hiddenTidsMaxDays: 'custom_hidden_tids_max_days', panelStartMinimized: 'custom_panel_start_minimized',
+            bulkLoadPageCount: 'custom_bulk_load_count', autoBulkLoadOnPageLoad: 'custom_auto_bulk_load',
+            gistToken: 'custom_gist_token', gistId: 'custom_gist_id',
+            gistBackupEnabled: 'custom_gist_backup_enabled',
+            bookmarks: 'custom_bookmarks',
+            bookmarksGistBackupEnabled: 'custom_bookmarks_gist_backup',
+            bookmarksPanelActiveTab: 'custom_bookmarks_active_tab',
+            scrollBallX: 'custom_scroll_ball_x', scrollBallY: 'custom_scroll_ball_y',
+            scrollSpeed1: 'custom_scroll_speed_1', scrollSpeed2: 'custom_scroll_speed_2',
+            scrollSpeed3: 'custom_scroll_speed_3', scrollMaxSpeed: 'custom_scroll_max_speed',
+            scrollSensitivity: 'custom_scroll_sensitivity',
+            dashboardX: 'custom_dashboard_x', dashboardY: 'custom_dashboard_y',
+            dashboardW: 'custom_dashboard_w', dashboardH: 'custom_dashboard_h'
+        };
+        return map[k] || ('custom_' + k);
+    };
+
+    // ================= 书签 Gist 云备份/还原 =================
+    const gistBookmarksBackup = async (silent) => {
+        if (!STATE.gistToken) { if (!silent) showPersistentToast('请先在设置中填写 GitHub Token', 'error'); return; }
+        try {
+            await gistSyncAll(silent ? null : '✅ ☁️ 已备份收藏夹到 Gist（' + STATE.bookmarks.length + ' 条）', silent, ['bookmarks.json']);
+        } catch (e) {
+            if (!silent) showPersistentToast('❌ ☁️ 收藏夹备份失败: ' + e.message, 'error');
+        }
+    };
+
+    const gistBookmarksRestore = async () => {
+        if (!STATE.gistToken) { showPersistentToast('请先设置 Token', 'error'); return; }
+        try {
+            let gistId = STATE.gistId;
+            if (!gistId) {
+                showPersistentToast('🔍 正在搜索备份 Gist...', 'info');
+                gistId = await gistFindByFilename('bookmarks.json') || await gistFindByFilename('hidden-tids.json');
+                if (!gistId) { showPersistentToast('未找到已有备份 Gist，请先在设置中填入 Gist ID 或执行一次备份', 'error'); return; }
+                STATE.gistId = gistId;
+                saveState('custom_gist_id', gistId);
+            }
+            const gist = await gistApi('GET', '/gists/' + gistId);
+            const file = gist.files && gist.files['bookmarks.json'];
+            if (!file || !file.content) { showPersistentToast('Gist 中未找到收藏夹备份文件', 'error'); return; }
+            const data = JSON.parse(file.content);
+            if (!data.records || !Array.isArray(data.records)) { showPersistentToast('备份数据格式无效', 'error'); return; }
+            const cloudCount = data.records.length;
+            const localCount = STATE.bookmarks.length;
+            let confirmMsg = `即将从 Gist 还原 ${cloudCount} 条收藏记录`;
+            if (localCount > 0) {
+                confirmMsg += `（现有本地 ${localCount} 条）`;
+                if (cloudCount < localCount) {
+                    confirmMsg += `\n\n⚠️ 云备份比本地少 ${localCount - cloudCount} 条！\n可能云备份不完整（被其他设备的自动备份覆盖）。\n只有云端存在的记录会被合并，本地多余的不会被删除。`;
+                }
+            }
+            confirmMsg += '\n\n建议还原前先用"💾 本地备份"按钮备份当前数据。\n\n确定继续？';
+            if (!confirm(confirmMsg)) return;
+
+            let added = 0, updated = 0;
+            for (const entry of data.records) {
+                if (!entry.tid) continue;
+                const existing = STATE.bookmarks.find(b => b.tid === entry.tid);
+                if (existing) {
+                    existing.type = entry.type || 'important';
+                    existing.title = entry.title || existing.title;
+                    existing.url = entry.url || existing.url;
+                    existing.addedAt = entry.addedAt || existing.addedAt;
+                    updated++;
+                } else {
+                    STATE.bookmarks.push({
+                        tid: entry.tid,
+                        title: entry.title || '',
+                        url: entry.url || '',
+                        type: entry.type || 'important',
+                        addedAt: entry.addedAt || Date.now()
+                    });
+                    added++;
+                }
+            }
+            STATE.bookmarks.sort((a, b) => b.addedAt - a.addedAt);
+            saveState('custom_bookmarks', STATE.bookmarks);
+            buildBookmarksPanel();
+            if (isOnListPage()) updateListBmBtns();
+            showPersistentToast('📥 已从 Gist 还原：新增 ' + added + ' 条，更新 ' + updated + ' 条（跳过 ' + (data.records.length - added - updated) + ' 条）', 'success');
+        } catch (e) {
+            showPersistentToast('❌ 收藏夹还原失败: ' + e.message, 'error');
+        }
+    };
+
+    // 测试 Token 有效性
+    const gistTestToken = async () => {
+        if (!STATE.gistToken) { showPersistentToast('请先填写 Token', 'error'); return; }
+        try {
+            const user = await gistApi('GET', '/user');
+            showPersistentToast('✅ Token 有效，用户: ' + user.login, 'success');
+        } catch (e) {
+            showPersistentToast('❌ Token 无效: ' + e.message, 'error');
+        }
+    };
+
     btnGroup.appendChild(btnToggleSet);
     btnGroup.appendChild(btnSelectAll);
+
+    // 一次性加载多页按钮
+    const btnBulkLoad = createBtn('📄 一次性加载' + STATE.bulkLoadPageCount + '页（自动提取）', '#e67e22');
+    btnBulkLoad.onclick = async () => {
+        if (STATE.isLoadingNextPage) {
+            showToast('正在加载中，请稍候...', 'info');
+            return;
+        }
+        btnBulkLoad.innerText = '⏳ 加载中...';
+        btnBulkLoad.disabled = true;
+        await bulkLoadPages(STATE.bulkLoadPageCount);
+        btnBulkLoad.innerText = '📄 一次性加载' + STATE.bulkLoadPageCount + '页（自动提取）';
+        btnBulkLoad.disabled = false;
+    };
+    btnGroup.appendChild(btnBulkLoad);
+
     btnGroup.appendChild(btnExtract);
     btnGroup.appendChild(btnOpen);
 
     const btnOffline115 = createBtn('☁️ 115 离线下载', '#fd7e14');
-    btnOffline115.onclick = () => offline115Panel.style.display = offline115Panel.style.display === 'none' ? 'flex' : 'none';
+    btnOffline115.onclick = () => showDashboard('offline115');
     btnGroup.appendChild(btnOffline115);
 
-    // 永久隐藏帖子 —— 共用记录函数
-    const recordCurrentPageTids = () => {
+    // 永久隐藏帖子 —— 共用记录函数（二次扫描，防无缝翻页并发插入）
+    const recordCurrentPageTids = async () => {
         const now = Date.now();
-        let added = 0;
+        const collectTids = () => {
+            const items = [];
+            document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
+                const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                if (link) {
+                    const tidMatch = link.href.match(/tid=(\d+)/);
+                    if (tidMatch) items.push({ tid: tidMatch[1], key: 'tid=' + tidMatch[1] });
+                }
+            });
+            return items;
+        };
+
+        // 第一次扫描
+        const pass1 = collectTids();
+        const pass1Added = [];
+        for (const item of pass1) {
+            if (!HIDDEN_TID_SET.has(item.key)) {
+                HIDDEN_TID_SET.add(item.key);
+                STATE.hiddenTids.push([item.tid, now]);
+                pass1Added.push(item);
+            }
+        }
+
+        // 等待 300ms，捕获无缝翻页可能刚好完成的并发插入
+        await new Promise(r => setTimeout(r, 300));
+
+        // 第二次扫描：只处理第一次没扫到的新增节点
+        const pass2 = collectTids();
+        const pass2Added = [];
+        for (const item of pass2) {
+            if (!HIDDEN_TID_SET.has(item.key)) {
+                HIDDEN_TID_SET.add(item.key);
+                STATE.hiddenTids.push([item.tid, now]);
+                pass2Added.push(item);
+            }
+        }
+
+        saveState('custom_hidden_tids', STATE.hiddenTids);
+
+        // 执行过滤
+        let hiddenCount = 0, visibleCount = 0;
+        document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
+            tbody.classList.remove('custom-hidden');
+            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            if (link) {
+                const tidMatch = link.href.match(/tid=(\d+)/);
+                if (tidMatch && HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
+                    tbody.classList.add('custom-hidden');
+                    const cb = tbody.querySelector('.custom-thread-checkbox');
+                    if (cb) cb.checked = false;
+                    hiddenCount++;
+                } else {
+                    visibleCount++;
+                }
+            }
+        });
+        // 补充关键词/用户屏蔽过滤
+        reapplyFilters();
+
+        const totalAdded = pass1Added.length + pass2Added.length;
+
+        // GitHub Gist 自动备份
+        if (totalAdded > 0 && STATE.gistBackupEnabled && STATE.gistToken) {
+            setTimeout(() => gistBackup(), 2000);
+        }
+
+        return {
+            scanned: pass1.length,
+            added: totalAdded,
+            pass1Added: pass1Added.length,
+            pass2Added: pass2Added.length,
+            hidden: hiddenCount,
+            visible: visibleCount,
+            beforeTotal: STATE.hiddenTids.length - totalAdded,
+            afterTotal: STATE.hiddenTids.length
+        };
+    };
+
+    const btnHideTidsRecord = createBtn('📝 记录当前页所有帖子', '#fd7e14');
+    btnHideTidsRecord.onclick = async () => {
+        const stats = await recordCurrentPageTids();
+        const msgs = [
+            `📊 扫描 ${stats.scanned} 条帖子`,
+            `🆕 新增记录 ${stats.added} 条`,
+            stats.pass2Added > 0 ? `⚠️ 第二轮捕获 ${stats.pass2Added} 条（无缝翻页并发）` : '',
+            `👁️ 隐藏 ${stats.hidden} 条，可见 ${stats.visible} 条`,
+        ].filter(Boolean);
+        showToast(msgs.join(' | '), 'info');
+    };
+    btnGroup.appendChild(btnHideTidsRecord);
+
+    // 解除隐藏：临时显示当前页面帖子（刷新后恢复隐藏）
+    const unhideCurrentPageTids = () => {
+        let shown = 0;
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
             const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
             if (link) {
                 const tidMatch = link.href.match(/tid=(\d+)/);
                 if (tidMatch) {
                     const key = 'tid=' + tidMatch[1];
-                    if (!HIDDEN_TID_SET.has(key)) {
-                        HIDDEN_TID_SET.add(key);
-                        STATE.hiddenTids.push([tidMatch[1], now]);
-                        added++;
+                    if (HIDDEN_TID_SET.has(key)) {
+                        STATE.tempUnhiddenSet.add(key);
+                        shown++;
                     }
                 }
             }
         });
-        saveState('custom_hidden_tids', STATE.hiddenTids);
-        return added;
+        if (shown === 0) { showToast('当前页没有已隐藏的帖子', 'info'); return shown; }
+        // 移除当前页所有帖子的隐藏状态（仅视觉上，不修改存储）
+        document.querySelectorAll('tbody[id^="normalthread_"].custom-hidden').forEach(tbody => {
+            tbody.classList.remove('custom-hidden');
+        });
+        reapplyFilters();
+        showToast(`🔓 已临时显示当前页 ${shown} 条帖子（刷新页面后恢复隐藏）`, 'info');
+        return shown;
     };
 
-    const btnHideTidsRecord = createBtn('📝 记录当前页所有帖子', '#fd7e14');
-    btnHideTidsRecord.onclick = () => {
-        const added = recordCurrentPageTids();
-        reapplyFilters();
-        showToast(`✅ 已记录 ${added} 条新帖子（累计 ${STATE.hiddenTids.length} 条）`, 'success');
-    };
-    btnGroup.appendChild(btnHideTidsRecord);
+    const btnUnhideTids = createBtn('🔓 临时显示隐藏帖子', '#17a2b8');
+    btnUnhideTids.title = '仅当前会话临时显示，刷新页面后恢复隐藏';
+    btnUnhideTids.onclick = () => { unhideCurrentPageTids(); };
+    btnGroup.appendChild(btnUnhideTids);
+
+    const btnBookmarks = createBtn('📑 收藏夹', '#6f42c1');
+    btnBookmarks.onclick = () => showDashboard('bookmarks');
+    btnGroup.appendChild(btnBookmarks);
 
     // 拦截分页跳转：跳转前提示记录当前页帖子
     let _pageNavBusy = false;
-    document.addEventListener('click', (e) => {
+    document.addEventListener('click', async (e) => {
         if (_pageNavBusy) return;
         const pgLink = e.target.closest('.pg a[href]');
         const autopbn = e.target.closest('#autopbn');
@@ -2929,9 +4200,13 @@
         const destUrl = pgLink ? pgLink.href : '';
 
         if (confirm(`⚠️ 当前页有 ${unrecorded} 条帖子未记录，跳转前是否记录？\n\n"确定" = 自动记录并跳转\n"取消" = 不记录直接跳转`)) {
-            const added = recordCurrentPageTids();
-            reapplyFilters();
-            showToast(`✅ 已记录 ${added} 条帖子（累计 ${STATE.hiddenTids.length} 条）`, 'success');
+            const stats = await recordCurrentPageTids();
+            const msgs = [
+                `📊 扫描 ${stats.scanned} 条，新增 ${stats.added} 条`,
+                stats.pass2Added > 0 ? `⚠️ 第二轮捕获 ${stats.pass2Added} 条` : '',
+                `👁️ 隐藏 ${stats.hidden} 条`,
+            ].filter(Boolean);
+            showToast(msgs.join(' | '), 'info');
         }
 
         _pageNavBusy = true;
@@ -2944,24 +4219,695 @@
     }, true);
 
 
+    // ================= 收藏夹管理面板 =================
+    const bookmarksPanel = document.createElement('div');
+    bookmarksPanel.style.cssText = 'display:none; flex-direction:column; gap:8px; background:white; padding:15px; border:1px solid #ccc; border-radius:5px; box-shadow:0 4px 6px rgba(0,0,0,0.1); width:340px; max-height:70vh;';
+
+    const buildBookmarksPanel = () => {
+        const activeTab = STATE.bookmarksPanelActiveTab || 'important';
+        const filtered = STATE.bookmarks.filter(b => b.type === activeTab);
+        // 按日期分组（最新在前）
+        const groups = {};
+        filtered.forEach(b => {
+            const day = new Date(b.addedAt).toISOString().slice(0, 10); // YYYY-MM-DD
+            if (!groups[day]) groups[day] = [];
+            groups[day].push(b);
+        });
+        const sortedDays = Object.keys(groups).sort((a, b) => b.localeCompare(a)); // 最新日期在前
+
+        bookmarksPanel.innerHTML = `
+            <div style="font-weight:bold; font-size:14px; color:#333; border-bottom:1px dashed #ccc; padding-bottom:8px; display:flex; align-items:center; justify-content:space-between;">
+                <span>📑 收藏夹（共 ${STATE.bookmarks.length} 条）</span>
+                <span id="bm-panel-close" style="cursor:pointer; font-size:18px; color:#999; line-height:1;" title="关闭">×</span>
+            </div>
+            <div style="display:flex; gap:6px;">
+                <button type="button" id="bm-tab-important" style="flex:1; padding:6px; font-size:12px; cursor:pointer; border:none; border-radius:4px; font-weight:bold; color:#fff; background:${activeTab === 'important' ? '#dc3545' : '#e9ecef'}; color:${activeTab === 'important' ? '#fff' : '#333'};">⭐ 重要（${STATE.bookmarks.filter(b => b.type === 'important').length}）</button>
+                <button type="button" id="bm-tab-normal" style="flex:1; padding:6px; font-size:12px; cursor:pointer; border:none; border-radius:4px; font-weight:bold; color:#fff; background:${activeTab === 'normal' ? '#007bff' : '#e9ecef'}; color:${activeTab === 'normal' ? '#fff' : '#333'};">📌 一般（${STATE.bookmarks.filter(b => b.type === 'normal').length}）</button>
+            </div>
+            <div style="display:flex; gap:4px; align-items:center; font-size:11px; color:#888;">
+                <span>☁️ 云备份：</span>
+                <button type="button" id="bm-gist-backup" style="padding:2px 8px; font-size:11px; cursor:pointer; background:#fd7e14; color:#fff; border:none; border-radius:3px;">备份</button>
+                <button type="button" id="bm-gist-restore" style="padding:2px 8px; font-size:11px; cursor:pointer; background:#6f42c1; color:#fff; border:none; border-radius:3px;">还原</button>
+                <label style="margin-left:6px; display:flex; align-items:center; gap:2px; cursor:pointer;">
+                    <input type="checkbox" id="bm-gist-auto" ${STATE.bookmarksGistBackupEnabled ? 'checked' : ''} style="width:12px; height:12px; cursor:pointer;"> 自动备份
+                </label>
+            </div>
+            <div style="display:flex; gap:4px; align-items:center; font-size:11px; color:#888;">
+                <span>💾 本地：</span>
+                <button type="button" id="bm-local-backup" style="padding:2px 8px; font-size:11px; cursor:pointer; background:#17a2b8; color:#fff; border:none; border-radius:3px;">备份</button>
+                <button type="button" id="bm-local-restore" style="padding:2px 8px; font-size:11px; cursor:pointer; background:#6c757d; color:#fff; border:none; border-radius:3px;">还原</button>
+            </div>
+            <div id="bm-list-area" style="flex:1; overflow-y:auto; min-height:60px; max-height:350px; font-size:12px;">
+                ${sortedDays.length === 0 ? '<div style="text-align:center; color:#999; padding:20px;">暂无收藏</div>' : ''}
+            </div>
+            <div id="bm-footer" style="display:${sortedDays.length > 0 ? 'flex' : 'none'}; align-items:center; justify-content:space-between; border-top:1px solid #eee; padding-top:6px; font-size:11px;">
+                <span>${filtered.length} 条收藏</span>
+                <div style="display:flex; gap:4px;">
+                    <button type="button" id="bm-open-selected" style="padding:2px 8px; font-size:11px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:3px;">📂 打开选中</button>
+                    <button type="button" id="bm-del-selected" style="padding:2px 8px; font-size:11px; cursor:pointer; background:#dc3545; color:#fff; border:none; border-radius:3px;">🗑 删除选中</button>
+                </div>
+            </div>
+        `;
+
+        // 绑定事件
+        bookmarksPanel.querySelector('#bm-panel-close').onclick = () => { if (_dashboardDB) _dashboardDB.style.display = 'none'; };
+
+        // Tab 切换
+        bookmarksPanel.querySelector('#bm-tab-important').onclick = () => {
+            STATE.bookmarksPanelActiveTab = 'important';
+            saveState('custom_bookmarks_active_tab', 'important');
+            buildBookmarksPanel();
+        };
+        bookmarksPanel.querySelector('#bm-tab-normal').onclick = () => {
+            STATE.bookmarksPanelActiveTab = 'normal';
+            saveState('custom_bookmarks_active_tab', 'normal');
+            buildBookmarksPanel();
+        };
+
+        // 云备份事件
+        bookmarksPanel.querySelector('#bm-gist-backup').onclick = () => gistBookmarksBackup(false);
+        bookmarksPanel.querySelector('#bm-gist-restore').onclick = () => gistBookmarksRestore();
+        bookmarksPanel.querySelector('#bm-gist-auto').onchange = (e) => {
+            STATE.bookmarksGistBackupEnabled = e.target.checked;
+            saveState('custom_bookmarks_gist_backup', e.target.checked);
+            if (e.target.checked && STATE.gistToken && STATE.bookmarks.length > 0) {
+                setTimeout(() => gistBookmarksBackup(true), 1000);
+            }
+        };
+
+        // 本地备份收藏夹
+        bookmarksPanel.querySelector('#bm-local-backup').onclick = () => {
+            if (STATE.bookmarks.length === 0) { showToast('没有可备份的收藏', 'error'); return; }
+            const data = {
+                version: 1,
+                exportedAt: new Date().toISOString(),
+                count: STATE.bookmarks.length,
+                records: STATE.bookmarks
+            };
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const ts = new Date().toISOString().slice(0, 10);
+            a.download = `bookmarks-backup-${ts}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showToast(`💾 已备份 ${STATE.bookmarks.length} 条收藏`, 'success');
+        };
+
+        // 本地还原收藏夹（合并模式）
+        bookmarksPanel.querySelector('#bm-local-restore').onclick = () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.style.display = 'none';
+            input.onchange = () => {
+                const file = input.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    try {
+                        const data = JSON.parse(ev.target.result);
+                        if (!data.records || !Array.isArray(data.records)) {
+                            showToast('备份文件格式无效', 'error');
+                            return;
+                        }
+                        const count = data.count || data.records.length;
+                        let newCount = 0, updateCount = 0;
+                        for (const entry of data.records) {
+                            if (!entry.tid) continue;
+                            const existing = STATE.bookmarks.find(b => b.tid === entry.tid);
+                            if (existing) {
+                                existing.type = entry.type || existing.type || 'important';
+                                existing.title = entry.title || existing.title;
+                                existing.url = entry.url || existing.url;
+                                existing.addedAt = entry.addedAt || existing.addedAt;
+                                updateCount++;
+                            } else {
+                                STATE.bookmarks.push({
+                                    tid: entry.tid,
+                                    title: entry.title || '',
+                                    url: entry.url || '',
+                                    type: entry.type || 'important',
+                                    addedAt: entry.addedAt || Date.now()
+                                });
+                                newCount++;
+                            }
+                        }
+                        STATE.bookmarks.sort((a, b) => b.addedAt - a.addedAt);
+                        saveState('custom_bookmarks', STATE.bookmarks);
+                        buildBookmarksPanel();
+                        if (isOnListPage()) updateListBmBtns();
+                        const msg = `📥 已还原：新增 ${newCount} 条，更新 ${updateCount} 条` + (count - newCount - updateCount > 0 ? `（跳过 ${count - newCount - updateCount} 条无效）` : '');
+                        showToast(msg, 'success');
+                        // 自动云端备份
+                        if (STATE.bookmarksGistBackupEnabled && STATE.gistToken && (newCount > 0 || updateCount > 0)) {
+                            setTimeout(() => gistBookmarksBackup(true), 1000);
+                        }
+                    } catch (err) {
+                        showToast(`还原失败: ${err.message}`, 'error');
+                    }
+                };
+                reader.readAsText(file);
+                input.remove();
+            };
+            document.body.appendChild(input);
+            input.click();
+        };
+
+        // 渲染日期分组列表
+        const listArea = bookmarksPanel.querySelector('#bm-list-area');
+        if (sortedDays.length > 0) {
+            sortedDays.forEach(day => {
+                const dayItems = groups[day];
+                // 日期分组标题
+                const dayHeader = document.createElement('div');
+                dayHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; padding:6px 0; margin-top:6px; border-bottom:1px solid #eee;';
+                dayHeader.innerHTML = `<span style="font-weight:bold; color:#555;">📅 ${day}（${dayItems.length}条）</span>`;
+                const dayBtnRow = document.createElement('span');
+                dayBtnRow.style.cssText = 'display:flex; gap:4px;';
+                const daySelAll = document.createElement('button');
+                daySelAll.type = 'button'; daySelAll.innerText = '全选';
+                daySelAll.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#6c757d; color:#fff; border:none; border-radius:2px;';
+                daySelAll.onclick = () => {
+                    const cbs = listArea.querySelectorAll(`input[data-day="${day}"]`);
+                    const allChecked = [...cbs].every(cb => cb.checked);
+                    cbs.forEach(cb => { cb.checked = !allChecked; });
+                };
+                dayBtnRow.appendChild(daySelAll);
+                const dayDelAll = document.createElement('button');
+                dayDelAll.type = 'button'; dayDelAll.innerText = '删除全部';
+                dayDelAll.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#dc3545; color:#fff; border:none; border-radius:2px;';
+                dayDelAll.onclick = () => {
+                    if (!confirm(`确定删除 ${day} 的全部 ${dayItems.length} 条收藏？`)) return;
+                    dayItems.forEach(b => {
+                        removeBookmarkWithoutGist(b.tid);
+                    });
+                    if (STATE.bookmarksGistBackupEnabled && STATE.gistToken) {
+                        setTimeout(() => gistBookmarksBackup(true), 1000);
+                    }
+                    buildBookmarksPanel();
+                    if (isOnListPage()) updateListBmBtns();
+                    showToast(`已删除 ${day} 的 ${dayItems.length} 条收藏`, 'success');
+                };
+                dayBtnRow.appendChild(dayDelAll);
+                dayHeader.appendChild(dayBtnRow);
+                listArea.appendChild(dayHeader);
+
+                // 每个收藏项
+                dayItems.sort((a, b) => b.addedAt - a.addedAt); // 同天内最新在前
+                dayItems.forEach(b => {
+                    const item = document.createElement('div');
+                    item.style.cssText = 'display:flex; align-items:center; gap:4px; padding:3px 0; border-bottom:1px solid #f5f5f5;';
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.value = b.tid;
+                    cb.dataset.day = day;
+                    cb.style.cssText = 'width:13px; height:13px; cursor:pointer; margin:0; flex-shrink:0;';
+                    item.appendChild(cb);
+                    const titleLink = document.createElement('a');
+                    titleLink.href = b.url;
+                    titleLink.innerText = b.title || b.url;
+                    titleLink.style.cssText = 'flex:1; font-size:11px; color:#007bff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-decoration:none;';
+                    titleLink.target = '_blank';
+                    titleLink.onclick = (e) => { e.stopPropagation(); };
+                    item.appendChild(titleLink);
+                    const timeSpan = document.createElement('span');
+                    timeSpan.style.cssText = 'font-size:10px; color:#999; white-space:nowrap; flex-shrink:0;';
+                    const t = new Date(b.addedAt);
+                    timeSpan.innerText = t.getHours().toString().padStart(2, '0') + ':' + t.getMinutes().toString().padStart(2, '0');
+                    item.appendChild(timeSpan);
+                    const delBtn = document.createElement('button');
+                    delBtn.type = 'button'; delBtn.innerText = '×';
+                    delBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:0 4px; background:none; border:1px solid #dc3545; color:#dc3545; border-radius:2px; flex-shrink:0; line-height:1;';
+                    delBtn.title = '删除';
+                    delBtn.onclick = () => {
+                        removeBookmark(b.tid);
+                        buildBookmarksPanel();
+                        if (isOnListPage()) updateListBmBtns();
+                        showToast('已删除收藏', 'info');
+                    };
+                    item.appendChild(delBtn);
+                    listArea.appendChild(item);
+                });
+            });
+        }
+
+        // 底部全选 / 删除选中
+        const footerSelAll = bookmarksPanel.querySelector('#bm-footer');
+        if (footerSelAll) {
+            // 全局全选
+            const selectAllCb = document.createElement('input');
+            selectAllCb.type = 'checkbox';
+            selectAllCb.style.cssText = 'width:13px; height:13px; cursor:pointer; margin:0 4px 0 0;';
+            selectAllCb.onchange = () => {
+                listArea.querySelectorAll('input[type="checkbox"]').forEach(cb2 => { cb2.checked = selectAllCb.checked; });
+            };
+            footerSelAll.querySelector('span').prepend(selectAllCb);
+
+            footerSelAll.querySelector('#bm-open-selected').onclick = () => {
+                const checkedCbs = listArea.querySelectorAll('input[type="checkbox"]:checked');
+                if (checkedCbs.length === 0) { showToast('请先勾选收藏', 'error'); return; }
+                checkedCbs.forEach(cb2 => {
+                    const bm = STATE.bookmarks.find(b => b.tid === cb2.value);
+                    if (bm) GM_openInTab(bm.url, { active: false, insert: true });
+                });
+                showToast(`已打开 ${checkedCbs.length} 个帖子`, 'success');
+            };
+            footerSelAll.querySelector('#bm-del-selected').onclick = () => {
+                const checkedCbs = listArea.querySelectorAll('input[type="checkbox"]:checked');
+                if (checkedCbs.length === 0) { showToast('请先勾选收藏', 'error'); return; }
+                if (!confirm(`确定删除选中的 ${checkedCbs.length} 条收藏？`)) return;
+                checkedCbs.forEach(cb2 => { removeBookmarkWithoutGist(cb2.value); });
+                if (STATE.bookmarksGistBackupEnabled && STATE.gistToken) {
+                    setTimeout(() => gistBookmarksBackup(true), 1000);
+                }
+                buildBookmarksPanel();
+                if (isOnListPage()) updateListBmBtns();
+                showToast(`已删除 ${checkedCbs.length} 条收藏`, 'success');
+            };
+        }
+    };
+
+    // 不带 Gist 备份的删除（批量删除时用，最后统一备份）
+    const removeBookmarkWithoutGist = (tid) => {
+        STATE.bookmarks = STATE.bookmarks.filter(b => b.tid !== tid);
+        saveState('custom_bookmarks', STATE.bookmarks);
+    };
+
+    // 判断是否在列表页
+    const isOnListPage = () => !!document.querySelector('tbody[id^="normalthread_"]');
+
+    // 更新列表页收藏按钮状态（删除/添加收藏后刷新星标透明度）
+    const updateListBmBtns = () => {
+        document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
+            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            if (!link) return;
+            const tid = (link.href.match(/tid=(\d+)/) || [])[1];
+            if (!tid) return;
+            const curType = getBookmarkType(tid);
+            // 提取区内的收藏按钮
+            tbody.querySelectorAll('.custom-extracted button[data-bm-type]').forEach(btn => {
+                btn.style.opacity = btn.dataset.bmType === curType ? '1' : '0.55';
+            });
+        });
+    };
+
+    buildBookmarksPanel();
+
     panel.appendChild(settingsPanel);
     panel.appendChild(offline115Panel);
+    panel.appendChild(bookmarksPanel);
     panel.appendChild(btnGroup);
     // 面板溢出时滚动
     panel.style.maxHeight = 'calc(100vh - 100px)';
     panel.style.overflowY = 'auto';
     document.body.appendChild(panel);
 
-    // 面板折叠小球
+    // ================= Dashboard 居中面板 =================
+    let _activeDashboardTab = 'bookmarks';
+    let _dashboardDB = null;
+    let _dashboardTabBtns = {};
+    let _dashboardPanes = {};
+
+    const switchDashboardTab = (name) => {
+        _activeDashboardTab = name;
+        const db = _dashboardDB;
+        if (!db) return;
+        Object.keys(_dashboardTabBtns).forEach(k => {
+            _dashboardTabBtns[k].style.color = k === name ? '#007bff' : '#666';
+            _dashboardTabBtns[k].style.borderBottomColor = k === name ? '#007bff' : 'transparent';
+        });
+        Object.keys(_dashboardPanes).forEach(k => {
+            _dashboardPanes[k].style.display = k === name ? '' : 'none';
+        });
+        // 懒渲染
+        if (name === 'bookmarks' && !_dashboardPanes.bookmarks.hasChildNodes()) renderBookmarksPane(_dashboardPanes.bookmarks);
+        if (name === 'settings' && !_dashboardPanes.settings.hasChildNodes()) renderSettingsPane(_dashboardPanes.settings);
+        if (name === 'offline115' && !_dashboardPanes.offline115.hasChildNodes()) render115Pane(_dashboardPanes.offline115);
+    };
+
+    const showDashboard = (tabName) => {
+        const db = _dashboardDB;
+        if (!db) { createDashboard(); return; }
+        const wasVisible = db.style.display === 'flex';
+        // 同一按钮再次点击 = 关闭面板
+        if (wasVisible && tabName && _activeDashboardTab === tabName) {
+            db.style.display = 'none';
+            return;
+        }
+        if (tabName) _activeDashboardTab = tabName;
+        db.style.display = 'flex';
+        switchDashboardTab(_activeDashboardTab);
+    };
+
+    // ---- 收藏夹 Pane ----
+    const renderBookmarksPane = (pane) => {
+        pane.appendChild(bookmarksPanel);
+        bookmarksPanel.style.display = '';
+        bookmarksPanel.style.width = '100%';
+        bookmarksPanel.style.maxHeight = 'none';
+        bookmarksPanel.style.border = 'none';
+        bookmarksPanel.style.boxShadow = 'none';
+        bookmarksPanel.style.padding = '0';
+        buildBookmarksPanel();
+    };
+
+    // ---- 设置 Pane ----
+    const renderSettingsPane = (pane) => {
+        pane.appendChild(settingsPanel);
+        settingsPanel.style.display = '';
+        settingsPanel.style.width = '100%';
+        settingsPanel.style.border = 'none';
+        settingsPanel.style.boxShadow = 'none';
+        settingsPanel.style.padding = '0';
+        settingsPanel.style.gap = '6px';
+    };
+
+    // ---- 115 Pane ----
+    const render115Pane = (pane) => {
+        pane.style.cssText = 'display:flex;gap:12px;';
+        const leftCol = document.createElement('div');
+        leftCol.style.cssText = 'flex:1;min-width:0;';
+        const rightCol = document.createElement('div');
+        rightCol.style.cssText = 'width:240px;flex-shrink:0;display:flex;flex-direction:column;gap:8px;';
+        while (offline115Panel.children.length > 0) {
+            const child = offline115Panel.children[0];
+            if (child.id === 'offline115-log' || child.id === 'offline115-quota') {
+                rightCol.appendChild(child);
+            } else {
+                leftCol.appendChild(child);
+            }
+        }
+        const logEl = rightCol.querySelector('#offline115-log');
+        if (logEl) { logEl.style.maxHeight = '300px'; logEl.style.flex = '1'; }
+        const quotaEl = rightCol.querySelector('#offline115-quota');
+        if (quotaEl) quotaEl.style.borderTop = 'none';
+        pane.appendChild(leftCol);
+        pane.appendChild(rightCol);
+        offline115Panel.style.display = '';
+        offline115Panel.style.width = '100%';
+        offline115Panel.style.border = 'none';
+        offline115Panel.style.boxShadow = 'none';
+        offline115Panel.style.padding = '0';
+    };
+
+    const createDashboard = () => {
+        const db = document.createElement('div');
+        db.id = 'custom-dashboard';
+        _dashboardDB = db;
+        const w = STATE.dashboardW || 750;
+        const h = STATE.dashboardH || 520;
+        const cx = STATE.dashboardX;
+        const cy = STATE.dashboardY;
+        db.style.cssText = `position:fixed;z-index:250000;width:${w}px;height:${h}px;background:#fff;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.25);display:none;flex-direction:column;min-width:420px;min-height:320px;`;
+        if (cx !== null && cy !== null) {
+            db.style.left = cx + 'px'; db.style.top = cy + 'px';
+        } else {
+            db.style.left = '50%'; db.style.top = '50%';
+            db.style.transform = 'translate(-50%, -50%)';
+        }
+
+        // 标题栏（拖拽把手）
+        const titleBar = document.createElement('div');
+        titleBar.style.cssText = 'flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:#f0f2f5;border-radius:8px 8px 0 0;cursor:move;user-select:none;border-bottom:1px solid #e0e0e0;';
+        const titleText = document.createElement('span');
+        titleText.style.cssText = 'font-size:13px;font-weight:bold;color:#333;';
+        titleText.innerText = '📋 论坛小脚本控制台';
+        titleBar.appendChild(titleText);
+        const closeBtn = document.createElement('span');
+        closeBtn.style.cssText = 'cursor:pointer;font-size:18px;color:#999;line-height:1;padding:0 4px;';
+        closeBtn.innerText = '×';
+        closeBtn.title = '关闭';
+        closeBtn.onclick = () => { db.style.display = 'none'; };
+        titleBar.appendChild(closeBtn);
+        db.appendChild(titleBar);
+
+        // Tab 栏
+        const tabBar = document.createElement('div');
+        tabBar.style.cssText = 'flex-shrink:0;display:flex;gap:0;background:#fafafa;border-bottom:2px solid #e0e0e0;';
+        const tabs = [
+            { id: 'bookmarks', label: '📑 收藏夹' },
+            { id: 'settings', label: '⚙️ 设置' },
+            { id: 'offline115', label: '☁️ 115 离线' }
+        ];
+        _dashboardTabBtns = {};
+        tabs.forEach(t => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.style.cssText = 'flex:1;padding:8px 0;font-size:13px;font-weight:bold;cursor:pointer;border:none;background:transparent;color:#666;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all 0.15s;';
+            btn.innerText = t.label;
+            btn.onclick = () => { _activeDashboardTab = t.id; switchDashboardTab(t.id); };
+            _dashboardTabBtns[t.id] = btn;
+            tabBar.appendChild(btn);
+        });
+        db.appendChild(tabBar);
+
+        // 内容区
+        const contentArea = document.createElement('div');
+        contentArea.style.cssText = 'flex:1;overflow-y:auto;padding:12px 16px;min-height:0;';
+        db.appendChild(contentArea);
+
+        _dashboardPanes = {};
+        ['bookmarks', 'settings', 'offline115'].forEach(id => {
+            const pane = document.createElement('div');
+            pane.id = 'db-pane-' + id;
+            pane.style.cssText = 'display:none;';
+            contentArea.appendChild(pane);
+            _dashboardPanes[id] = pane;
+        });
+
+        // 拖拽
+        let dragInfo = null;
+        titleBar.onmousedown = (e) => {
+            if (e.target === closeBtn) return;
+            dragInfo = { sx: e.clientX, sy: e.clientY, l: db.offsetLeft, t: db.offsetTop };
+            db.style.transform = '';
+            db.style.left = dragInfo.l + 'px';
+            db.style.top = dragInfo.t + 'px';
+            e.preventDefault();
+        };
+        document.addEventListener('mousemove', (e) => {
+            if (!dragInfo) return;
+            const nl = Math.max(0, Math.min(window.innerWidth - 100, dragInfo.l + (e.clientX - dragInfo.sx)));
+            const nt = Math.max(0, Math.min(window.innerHeight - 40, dragInfo.t + (e.clientY - dragInfo.sy)));
+            db.style.left = nl + 'px'; db.style.top = nt + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (!dragInfo) return;
+            STATE.dashboardX = db.offsetLeft; STATE.dashboardY = db.offsetTop;
+            saveState('custom_dashboard_x', STATE.dashboardX); saveState('custom_dashboard_y', STATE.dashboardY);
+            dragInfo = null;
+        });
+
+        // 右下角缩放把手
+        const resizeHandle = document.createElement('div');
+        resizeHandle.style.cssText = 'position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,#ccc 50%,#ccc 60%,transparent 60%,transparent 70%,#ccc 70%,#ccc 80%,transparent 80%);';
+        resizeHandle.title = '拖拽调整大小';
+        db.appendChild(resizeHandle);
+        let resizeInfo = null;
+        resizeHandle.onmousedown = (e) => {
+            resizeInfo = { sx: e.clientX, sy: e.clientY, w: db.offsetWidth, h: db.offsetHeight };
+            e.preventDefault(); e.stopPropagation();
+        };
+        document.addEventListener('mousemove', (e) => {
+            if (!resizeInfo) return;
+            db.style.width = Math.max(420, resizeInfo.w + (e.clientX - resizeInfo.sx)) + 'px';
+            db.style.height = Math.max(320, resizeInfo.h + (e.clientY - resizeInfo.sy)) + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (!resizeInfo) return;
+            STATE.dashboardW = db.offsetWidth; STATE.dashboardH = db.offsetHeight;
+            saveState('custom_dashboard_w', STATE.dashboardW); saveState('custom_dashboard_h', STATE.dashboardH);
+            resizeInfo = null;
+        });
+
+        document.body.appendChild(db);
+        switchDashboardTab(_activeDashboardTab);
+        db.style.display = 'flex';
+    };
+    const BALL_SIZE = 66;
+    const BALL_GAP = 8;
+    const BALL_CSS = (right, bg) =>
+        `position:fixed; bottom:50px; right:${right}px; z-index:100000; width:${BALL_SIZE}px; height:${BALL_SIZE}px; background:${bg}; color:#fff; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; font-size:24px; font-weight:bold; box-shadow:0 4px 16px rgba(0,0,0,0.3); user-select:none;`;
+
+    // 齿轮小球（展开面板）
     const minimizeBall = document.createElement('div');
-    minimizeBall.style.cssText = 'position:fixed; bottom:50px; right:50px; z-index:100000; width:36px; height:36px; background:#007bff; color:#fff; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; font-size:16px; font-weight:bold; box-shadow:0 4px 12px rgba(0,0,0,0.3); user-select:none;';
+    minimizeBall.style.cssText = BALL_CSS(50, '#007bff');
     minimizeBall.innerText = '⚙';
     minimizeBall.title = '展开面板';
     minimizeBall.onclick = () => {
-        panel.style.display = ''; minimizeBall.style.display = 'none';
+        panel.style.display = ''; minimizeBall.style.display = 'none'; unhideMiniBall.style.display = 'none'; login115Ball.style.display = 'none'; recordMiniBall.style.display = 'none';
+        minimizeBtn.style.display = 'flex';
         STATE.panelMinimized = false;
     };
     document.body.appendChild(minimizeBall);
+
+    // 解除隐藏小球（位于展开按钮正上方）
+    const unhideMiniBall = document.createElement('div');
+    unhideMiniBall.style.cssText = BALL_CSS(50, '#17a2b8').replace('bottom:50px', 'bottom:' + (50 + BALL_SIZE + BALL_GAP) + 'px');
+    unhideMiniBall.innerText = '🔓';
+    unhideMiniBall.title = '临时显示当前页隐藏帖子（刷新后恢复）';
+    unhideMiniBall.onclick = (e) => {
+        e.stopPropagation();
+        unhideCurrentPageTids();
+    };
+    document.body.appendChild(unhideMiniBall);
+
+    // 115网盘登录小球
+    const r115 = 50 + BALL_SIZE + BALL_GAP;
+    const login115Ball = document.createElement('div');
+    login115Ball.style.cssText = BALL_CSS(r115, '#21b553');
+    login115Ball.innerText = '🔗';
+    login115Ball.title = '打开115网盘登录';
+    login115Ball.onclick = (e) => {
+        e.stopPropagation();
+        GM_openInTab('https://115.com/', { active: true });
+    };
+    document.body.appendChild(login115Ball);
+
+    // 记录小球（记录当前页）
+    const r2 = r115 + BALL_SIZE + BALL_GAP;
+    const recordMiniBall = document.createElement('div');
+    recordMiniBall.style.cssText = BALL_CSS(r2, '#fd7e14');
+    recordMiniBall.innerText = '📝';
+    recordMiniBall.title = '记录当前页所有帖子';
+    recordMiniBall.onclick = async (e) => {
+        e.stopPropagation();
+        const stats = await recordCurrentPageTids();
+        if (stats.added > 0) {
+            const msgs = [
+                `📊 扫描 ${stats.scanned} 条，新增 ${stats.added} 条`,
+                stats.pass2Added > 0 ? `⚠️ 第二轮捕获 ${stats.pass2Added} 条` : '',
+                `👁️ 隐藏 ${stats.hidden} 条`,
+            ].filter(Boolean);
+            showToast(msgs.join(' | '), 'info');
+        } else {
+            showToast(`📊 扫描 ${stats.scanned} 条，无新帖需要记录`, 'info');
+        }
+    };
+    document.body.appendChild(recordMiniBall);
+
+    // ================= 滚动小球 =================
+    const SCROLL_BALL = (() => {
+        const b = document.createElement('div');
+        const SIZE = 88;
+        const cx = STATE.scrollBallX, cy = STATE.scrollBallY;
+        const defX = window.innerWidth - 180, defY = window.innerHeight / 2 - SIZE / 2;
+        b.style.cssText = `position:fixed;z-index:150000;width:${SIZE}px;height:${SIZE}px;border-radius:50%;background:rgba(0,123,255,0.82);color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;box-shadow:0 6px 20px rgba(0,0,0,0.3);user-select:none;left:${cx != null ? cx : defX}px;top:${cy != null ? cy : defY}px;cursor:grab;transition:background 0.2s;`;
+        b.title = '向下拖=滚动 | 左滑锁定 | 右滑取消 | 按住上沿拖=移动';
+        // 列表页或详情页，页面可滚动就显示
+        if (document.body.scrollHeight > window.innerHeight * 1.2) { b.style.display = 'flex'; }
+        else { b.style.display = 'none'; }
+
+        let _mode = 'idle'; // idle | dragging | locked
+        let _speed = 0, _dir = 1; // px/frame, 1=down -1=up
+        let _raf = null;
+        let _drag = null; // { ox, oy, sx, sy, type:'scroll'|'move' }
+
+        const _updateDisplay = () => {
+            if (_mode === 'idle') {
+                b.innerHTML = '<span style="font-size:22px">⏬</span><span style="font-size:10px;opacity:0.7">拖拽</span>';
+                b.style.background = 'rgba(0,123,255,0.82)';
+            } else if (_mode === 'dragging') {
+                const spd = Math.round(_speed);
+                b.innerHTML = `<span style="font-size:20px;font-weight:bold">${spd}px</span><span style="font-size:12px">${_dir > 0 ? '↓' : '↑'}</span>`;
+                b.style.background = 'rgba(253,126,20,0.9)';
+            } else if (_mode === 'locked') {
+                const spd = Math.round(_speed);
+                b.innerHTML = `<span style="font-size:18px;font-weight:bold">${spd}px</span><span style="font-size:10px">🔒 ${_dir > 0 ? '↓' : '↑'}</span>`;
+                b.style.background = 'rgba(220,53,69,0.9)';
+            }
+        };
+
+        const _doScroll = () => {
+            if (_mode === 'dragging' || _mode === 'locked') {
+                window.scrollBy(0, _speed * _dir / 60);
+                _raf = requestAnimationFrame(_doScroll);
+            }
+        };
+
+        const _startRaf = () => { if (!_raf) _raf = requestAnimationFrame(_doScroll); };
+        const _stopRaf = () => { if (_raf) { cancelAnimationFrame(_raf); _raf = null; } };
+
+        const _onDown = (e) => {
+            e.preventDefault();
+            const rect = b.getBoundingClientRect();
+            const relX = e.clientX - rect.left, relY = e.clientY - rect.top;
+            _drag = {
+                ox: e.clientX, oy: e.clientY,
+                sx: b.offsetLeft, sy: b.offsetTop,
+                type: relY < 30 ? 'move' : 'scroll',
+                dir: 0, dist: 0
+            };
+            if (_drag.type === 'move') { b.style.cursor = 'move'; }
+            else { b.style.cursor = 'grabbing'; _startRaf(); }
+            if (_mode === 'locked') {
+                _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); return;
+            }
+            _mode = (_drag.type === 'move') ? _mode : 'dragging';
+            _updateDisplay();
+        };
+
+        const _onMove = (e) => {
+            if (!_drag) return;
+            const dx = e.clientX - _drag.ox, dy = e.clientY - _drag.oy;
+            if (_drag.type === 'move') {
+                const nl = Math.max(0, Math.min(window.innerWidth - SIZE, _drag.sx + dx));
+                const nt = Math.max(0, Math.min(window.innerHeight - SIZE, _drag.sy + dy));
+                b.style.left = nl + 'px'; b.style.top = nt + 'px';
+                return;
+            }
+            _drag.dist = Math.abs(dy);
+            _drag.dir = dy > 0 ? 1 : -1;
+            const sens = STATE.scrollSensitivity || 2;
+            const maxSpd = STATE.scrollMaxSpeed || 600;
+            _speed = Math.min(maxSpd, _drag.dist * sens);
+            _dir = _drag.dir;
+            if (dx < -50) {
+                _mode = 'locked'; b.style.cursor = 'grab'; _drag = null; _updateDisplay(); return;
+            }
+            if (dx > 50) {
+                _mode = 'idle'; _speed = 0; b.style.cursor = 'grab'; _drag = null; _stopRaf(); _updateDisplay(); return;
+            }
+            _updateDisplay();
+        };
+
+        const _onUp = (e) => {
+            if (!_drag) return;
+            if (_drag.type === 'move') {
+                STATE.scrollBallX = b.offsetLeft; STATE.scrollBallY = b.offsetTop;
+                saveState('custom_scroll_ball_x', STATE.scrollBallX); saveState('custom_scroll_ball_y', STATE.scrollBallY);
+            } else if (_drag.type === 'scroll' && _mode === 'dragging') {
+                _mode = 'idle'; _speed = 0; _stopRaf();
+            }
+            b.style.cursor = 'grab'; _drag = null; _updateDisplay();
+        };
+
+        b.addEventListener('mousedown', _onDown);
+        document.addEventListener('mousemove', _onMove);
+        document.addEventListener('mouseup', _onUp);
+        // 手动滚轮 / 按键 → 取消自动滚动
+        window.addEventListener('wheel', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
+        window.addEventListener('keydown', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
+
+        // 页面可滚动就显示
+        const _checkVisibility = () => {
+            if (document.body.scrollHeight > window.innerHeight * 1.2) {
+                b.style.display = 'flex';
+            }
+        };
+        _checkVisibility();
+        // 监听 DOM 变化 + 滚动（多页加载后页面变长）
+        const _obs = new MutationObserver(_checkVisibility);
+        _obs.observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('scroll', _checkVisibility, { passive: true });
+        _updateDisplay();
+        return b;
+    })();
+    document.body.appendChild(SCROLL_BALL);
 
     // 面板右上角折叠按钮
     const minimizeBtn = document.createElement('div');
@@ -2973,12 +4919,12 @@
     minimizeBtn.style.top = 'auto';
     minimizeBtn.onclick = (e) => {
         e.stopPropagation();
-        panel.style.display = 'none'; minimizeBall.style.display = 'flex';
+        panel.style.display = 'none'; minimizeBall.style.display = 'flex'; unhideMiniBall.style.display = 'flex'; login115Ball.style.display = 'flex'; recordMiniBall.style.display = 'flex';
         STATE.panelMinimized = true;
         minimizeBtn.style.display = 'none';
     };
     minimizeBall.onclick = () => {
-        panel.style.display = ''; minimizeBall.style.display = 'none'; minimizeBtn.style.display = 'flex';
+        panel.style.display = ''; minimizeBall.style.display = 'none'; unhideMiniBall.style.display = 'none'; login115Ball.style.display = 'none'; recordMiniBall.style.display = 'none'; minimizeBtn.style.display = 'flex';
         STATE.panelMinimized = false;
     };
     document.body.appendChild(minimizeBtn);
@@ -2997,8 +4943,29 @@
     window.addEventListener('resize', updateMinBtnPos);
     window.addEventListener('scroll', updateMinBtnPos);
 
+    // ================= 启动时应用面板默认状态 =================
+    if (STATE.panelStartMinimized) {
+        panel.style.display = 'none';
+        minimizeBall.style.display = 'flex';
+        unhideMiniBall.style.display = 'flex';
+        login115Ball.style.display = 'flex';
+        recordMiniBall.style.display = 'flex';
+        minimizeBtn.style.display = 'none';
+        STATE.panelMinimized = true;
+    }
+
+    // ================= 启动时自动执行多页加载 =================
+    if (STATE.autoBulkLoadOnPageLoad && threadListContainer) {
+        setTimeout(() => {
+            bulkLoadPages(STATE.bulkLoadPageCount);
+        }, 1000);
+    }
+
     // ================= 启动时自动全选并提取 =================
-    if (STATE.autoExtractOnLoad) {
+    // 如果开启了自动多页加载且有下一页，则由 bulkLoadPages 统一处理提取，此处跳过
+    // 如果没有下一页（帖子太少），自动多页加载会直接 return，此时仍需此处兜底提取
+    const _hasNextPage = !!document.querySelector('a.nxt');
+    if (STATE.autoExtractOnLoad && !(STATE.autoBulkLoadOnPageLoad && _hasNextPage)) {
         setTimeout(() => {
             const visibleCbs = document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden) .custom-thread-checkbox');
             if (visibleCbs.length > 0) {
@@ -3010,7 +4977,7 @@
 
     // ================= 启动时自动展开115面板 =================
     if (STATE.offline115AutoOpen) {
-        offline115Panel.style.display = 'flex';
+        showDashboard('offline115');
     }
 
     // ================= 帖子详情页：内联 TXT/ZIP 内容展示 =================
@@ -3022,6 +4989,45 @@
 
         const toAbs = (raw) => { try { return new URL(raw, location.href).href; } catch(e) { return raw; } };
         const allMergedTexts = [];
+
+        // ---- 收藏按钮（详情页顶部） ----
+        (() => {
+            const _detailTid = (location.href.match(/tid=(\d+)/) || [])[1];
+            if (!_detailTid) return;
+            const _detailTitle = (() => {
+                const t = document.querySelector('#thread_subject') || document.querySelector('h1.ts') || document.querySelector('title');
+                return t ? t.innerText.trim().replace(/\s+/g, ' ').slice(0, 200) : location.href;
+            })();
+            const _bmDetailWrap = document.createElement('div');
+            _bmDetailWrap.style.cssText = 'max-width:980px; margin:0 auto 12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;';
+            const _mkDetailBmBtn = (type, label, bgColor) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.innerText = label;
+                const _curType = getBookmarkType(_detailTid);
+                btn.style.cssText = `padding:5px 14px; font-size:13px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.6'};`;
+                btn.onclick = () => {
+                    if (isBookmarked(_detailTid) && getBookmarkType(_detailTid) === type) {
+                        removeBookmark(_detailTid);
+                        showToast('已取消收藏', 'info');
+                        btn.style.opacity = '0.6';
+                    } else {
+                        addBookmark(_detailTid, _detailTitle, location.href, type);
+                        showToast(`已收藏为${type === 'important' ? '重要⭐' : '一般📌'}`, 'success');
+                        btn.style.opacity = '1';
+                        const other = _bmDetailWrap.querySelector(type === 'important' ? '.custom-bm-detail-normal' : '.custom-bm-detail-important');
+                        if (other) other.style.opacity = '0.6';
+                    }
+                };
+                btn.className = type === 'important' ? 'custom-bm-detail-important' : 'custom-bm-detail-normal';
+                return btn;
+            };
+            _bmDetailWrap.appendChild(_mkDetailBmBtn('important', '⭐ 收藏为重要帖子', '#dc3545'));
+            _bmDetailWrap.appendChild(_mkDetailBmBtn('normal', '📌 收藏为一般帖子', '#007bff'));
+            const _insertTarget = postList.parentNode || document.body;
+            _insertTarget.insertBefore(_bmDetailWrap, postList);
+        })();
+
 
         // 详情页推送函数（复用115面板的目录设置）
         const detailPushTo115 = async (links, btn) => {
@@ -3122,7 +5128,7 @@
                 const pushBtn = document.createElement('button');
                 pushBtn.type = 'button';
                 pushBtn.innerText = '☁️';
-                pushBtn.style.cssText = 'display:inline-block; font-size:12px; cursor:pointer; padding:0 4px; margin-left:3px; background:#fd7e14; color:#fff; border:none; border-radius:2px; vertical-align:baseline; line-height:1.4;';
+                pushBtn.style.cssText = 'display:inline-block; font-size:12px; cursor:pointer; padding:0 8px; margin-left:3px; background:#fd7e14; color:#fff; border:none; border-radius:2px; vertical-align:baseline; line-height:1.4;';
                 pushBtn.title = '推送到115';
                 pushBtn.onclick = (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
@@ -3254,7 +5260,7 @@
                     if (extractedLinks.length > 0) {
                         const inlinePushBtn = document.createElement('button');
                         inlinePushBtn.type = 'button'; inlinePushBtn.innerText = `☁️ 推送${extractedLinks.length}条到115`;
-                        inlinePushBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                        inlinePushBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 16px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                         inlinePushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); detailPushTo115(extractedLinks, inlinePushBtn); };
                         inlineBtnRow.appendChild(inlinePushBtn);
                     }
@@ -3319,7 +5325,7 @@
             if (allExtractedLinks.length > 0) {
                 const topPushAllBtn = document.createElement('button');
                 topPushAllBtn.type = 'button'; topPushAllBtn.innerText = `☁️ 一键推送全部 (${allExtractedLinks.length})`;
-                topPushAllBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 12px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                topPushAllBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 24px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 topPushAllBtn.onclick = () => { detailPushTo115(allExtractedLinks, topPushAllBtn); };
                 topBtnRow.appendChild(topPushAllBtn);
             }
@@ -3341,13 +5347,13 @@
 
                     const lineCopyBtn = document.createElement('button');
                     lineCopyBtn.type = 'button'; lineCopyBtn.innerText = '复制';
-                    lineCopyBtn.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#6c757d; color:#fff; border:none; border-radius:2px; flex-shrink:0;';
+                    lineCopyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px; flex-shrink:0; font-weight:bold;';
                     lineCopyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(link).then(() => { lineCopyBtn.innerText = '已复制'; setTimeout(() => lineCopyBtn.innerText = '复制', 1500); }); };
                     lineDiv.appendChild(lineCopyBtn);
 
                     const linePushBtn = document.createElement('button');
                     linePushBtn.type = 'button'; linePushBtn.innerText = '☁️';
-                    linePushBtn.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#fd7e14; color:#fff; border:none; border-radius:2px; flex-shrink:0;';
+                     linePushBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:2px 16px; background:#fd7e14; color:#fff; border:none; border-radius:3px; flex-shrink:0; font-weight:bold;';
                     linePushBtn.title = '推送到115';
                     linePushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); detailPushTo115([link], linePushBtn); };
                     lineDiv.appendChild(linePushBtn);
@@ -3376,8 +5382,52 @@
         }
     };
 
+    // ================= 详情页：强制加载所有懒加载图片 =================
+    const forceLoadImages = (container) => {
+        const imgs = (container || document).querySelectorAll('.t_f img, .pcb img, img[file], img[zoomfile]');
+        imgs.forEach(img => {
+            const realSrc = img.getAttribute('file') || img.getAttribute('zoomfile');
+            if (realSrc && img.src !== realSrc) {
+                img.src = realSrc;
+                img.removeAttribute('file');
+                img.removeAttribute('zoomfile');
+                img.classList.remove('lazy', 'imgzoom');
+                img.removeAttribute('data-src');
+                img.removeAttribute('data-original');
+            }
+        });
+    };
+
     // 仅在详情页执行（非列表页）
     if (!document.querySelector('tbody[id^="normalthread_"]')) {
+        // 强制加载当前所有帖子中的懒加载图片
+        forceLoadImages();
+
+        // 监听动态新增（如 AJAX 翻页加载新楼层），自动替换新图片
+        const postlist = document.querySelector('#postlist');
+        if (postlist) {
+            const detailImgObserver = new MutationObserver((mutations) => {
+                for (const m of mutations) {
+                    m.addedNodes.forEach(node => {
+                        if (node.nodeType === 1) {
+                            if (node.tagName === 'IMG') {
+                                const realSrc = node.getAttribute('file') || node.getAttribute('zoomfile');
+                                if (realSrc && node.src !== realSrc) {
+                                    node.src = realSrc;
+                                    node.removeAttribute('file');
+                                    node.removeAttribute('zoomfile');
+                                    node.classList.remove('lazy', 'imgzoom');
+                                }
+                            } else if (node.querySelectorAll) {
+                                forceLoadImages(node);
+                            }
+                        }
+                    });
+                }
+            });
+            detailImgObserver.observe(postlist, { childList: true, subtree: true });
+        }
+
         initDetailPage();
     }
 
