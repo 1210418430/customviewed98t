@@ -61,6 +61,7 @@
         panelMinimized: false,
         panelStartMinimized: GM_getValue('custom_panel_start_minimized', false),
         panelPosition: GM_getValue('custom_panel_position', 'bottom-right'), // 'bottom-right' | 'center' | 'top-left'
+        dashboardPosition: GM_getValue('custom_dashboard_position', 'center'), // 'center' | 'bottom-right' | 'top-left'
         bulkLoadPageCount: GM_getValue('custom_bulk_load_count', 3),
         autoBulkLoadOnPageLoad: GM_getValue('custom_auto_bulk_load', false),
         gistToken: GM_getValue('custom_gist_token', ''),
@@ -1864,6 +1865,43 @@
     panelPosRow.appendChild(panelPosLabel);
     panelPosRow.appendChild(panelPosSelect);
     settingsPanel.appendChild(panelPosRow);
+
+    // 控制台（Dashboard）位置设置
+    const dbPosRow = document.createElement('div');
+    dbPosRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const dbPosLabel = document.createElement('span');
+    dbPosLabel.innerText = '🖥️ 控制台窗口位置';
+    dbPosLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const dbPosSelect = document.createElement('select');
+    dbPosSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [
+        { value: 'center', label: '居中显示' },
+        { value: 'bottom-right', label: '右下角' },
+        { value: 'top-left', label: '左上角' }
+    ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.innerText = opt.label;
+        if (opt.value === STATE.dashboardPosition) o.selected = true;
+        dbPosSelect.appendChild(o);
+    });
+    dbPosSelect.onchange = (e) => {
+        STATE.dashboardPosition = e.target.value;
+        saveState('custom_dashboard_position', e.target.value);
+        // 清除旧的拖拽坐标，让预设位置生效
+        STATE.dashboardX = null; STATE.dashboardY = null;
+        saveState('custom_dashboard_x', null); saveState('custom_dashboard_y', null);
+        // 如果控制台正在显示，关闭后下次打开即用新位置
+        if (_dashboardDB && _dashboardDB.style.display === 'flex') {
+            _dashboardDB.style.display = 'none';
+            _dashboardDB.remove();
+            _dashboardDB = null;
+            _dashboardPanes = {};
+        }
+        showToast('🖥️ 控制台位置已切换为：' + dbPosSelect.selectedOptions[0].innerText + '（下次打开生效）', 'info');
+    };
+    dbPosRow.appendChild(dbPosLabel);
+    dbPosRow.appendChild(dbPosSelect);
+    settingsPanel.appendChild(dbPosRow);
 
     // 图片数量设置
     const imgCountRow = document.createElement('div');
@@ -3933,7 +3971,8 @@
             scrollSpeed3: 'custom_scroll_speed_3', scrollMaxSpeed: 'custom_scroll_max_speed',
             scrollSensitivity: 'custom_scroll_sensitivity',
             dashboardX: 'custom_dashboard_x', dashboardY: 'custom_dashboard_y',
-            dashboardW: 'custom_dashboard_w', dashboardH: 'custom_dashboard_h'
+            dashboardW: 'custom_dashboard_w', dashboardH: 'custom_dashboard_h',
+            dashboardPosition: 'custom_dashboard_position', panelPosition: 'custom_panel_position'
         };
         return map[k] || ('custom_' + k);
     };
@@ -4621,15 +4660,23 @@
         _dashboardDB = db;
         const w = STATE.dashboardW || 750;
         const h = STATE.dashboardH || 520;
-        const cx = STATE.dashboardX;
-        const cy = STATE.dashboardY;
         db.style.cssText = `position:fixed;z-index:250000;width:${w}px;height:${h}px;background:#fff;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.25);display:none;flex-direction:column;min-width:420px;min-height:320px;`;
-        if (cx !== null && cy !== null) {
-            db.style.left = cx + 'px'; db.style.top = cy + 'px';
-        } else {
-            db.style.left = '50%'; db.style.top = '50%';
-            db.style.transform = 'translate(-50%, -50%)';
-        }
+        // 根据预设位置或拖拽坐标定位
+        const pos = STATE.dashboardPosition || 'center';
+        const applyDashboardPos = (p) => {
+            db.style.transform = ''; db.style.left = ''; db.style.right = ''; db.style.top = ''; db.style.bottom = '';
+            switch (p) {
+                case 'bottom-right':
+                    db.style.right = '50px'; db.style.bottom = '50px'; break;
+                case 'top-left':
+                    db.style.left = '50px'; db.style.top = '50px'; break;
+                case 'center':
+                default:
+                    db.style.left = '50%'; db.style.top = '50%';
+                    db.style.transform = 'translate(-50%, -50%)'; break;
+            }
+        };
+        applyDashboardPos(pos);
 
         // 标题栏（拖拽把手）
         const titleBar = document.createElement('div');
