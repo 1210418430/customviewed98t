@@ -1759,7 +1759,8 @@
         }
         STATE.panelPosition = pos;
         saveState('custom_panel_position', pos);
-        updateMinBtnPos();
+        // updateMinBtnPos 在脚本后面才定义，此处通过 setTimeout 延迟调用
+        setTimeout(() => { if (typeof updateMinBtnPos === 'function') updateMinBtnPos(); }, 0);
     };
     // 应用已保存的面板位置
     applyPanelPosition(STATE.panelPosition);
