@@ -21,8 +21,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @require      https://lib.baomitu.com/jszip/3.10.1/jszip.min.js
-// @downloadURL https://update.sleazyfork.org/scripts/568616/%E8%AE%BA%E5%9D%9B%E5%B0%8F%E8%84%9A%E6%9C%AC-%E5%85%A8%E8%83%BD%E7%9C%8B%E5%B8%96%E4%B8%8E%E6%8F%90%E5%8F%96%E8%BE%85%E5%8A%A9.user.js
-// @updateURL https://update.sleazyfork.org/scripts/568616/%E8%AE%BA%E5%9D%9B%E5%B0%8F%E8%84%9A%E6%9C%AC-%E5%85%A8%E8%83%BD%E7%9C%8B%E5%B8%96%E4%B8%8E%E6%8F%90%E5%8F%96%E8%BE%85%E5%8A%A9.meta.js
+// @downloadURL https://raw.githubusercontent.com/1210418430/customviewed98t/master/brower.js
+// @updateURL https://raw.githubusercontent.com/1210418430/customviewed98t/master/brower.js
 // ==/UserScript==
 
 (function() {
