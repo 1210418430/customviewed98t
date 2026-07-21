@@ -13,6 +13,7 @@
 // @match        *://sehuatang.org/*
 // @match        *://127.0.0.1:20000/*
 // @match        *://*.127.0.0.1:20000/*
+// @match        *://192.168.0.88:14000/*
 // @match        *://*.sehuatang.org/*
 // @grant        GM_openInTab
 // @grant        GM_setValue
@@ -3106,6 +3107,7 @@
                 openThreadBtn.onclick = (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
                     GM_openInTab(threadUrl, { active: false, insert: true });
+                    showToast('📂 已在新标签页打开帖子', 'success');
                 };
                 bmRow.appendChild(openThreadBtn);
                 box.appendChild(bmRow);
