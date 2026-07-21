@@ -572,6 +572,10 @@
 
     // GM_xmlhttpRequest 封装 —— 绕过 CORS 限制 + 防盗链
     const gmFetch = (url, responseType = 'text') => new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            reject(new Error('GM_xmlhttpRequest 不可用'));
+            return;
+        }
         console.log('[gmFetch] 尝试请求:', url);
         const doRequest = (useCookie) => {
             const opts = {
@@ -1225,28 +1229,58 @@
     };
 
     const fetchTxtContent = async (url) => {
-        let response;
+        // 辅助：用 XHR 请求（最通用的回退，移动端 Safari 也能用）
+        const xhrFetch = (u) => new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', u, true);
+            xhr.responseType = 'text';
+            xhr.timeout = 30000;
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 400) {
+                    resolve({ text: xhr.responseText, contentType: xhr.getResponseHeader('Content-Type') || '' });
+                } else {
+                    reject(new Error(`XHR HTTP ${xhr.status}`));
+                }
+            };
+            xhr.onerror = () => reject(new Error('XHR 网络错误'));
+            xhr.ontimeout = () => reject(new Error('XHR 超时'));
+            xhr.send();
+        });
+
+        let text, contentType;
+        // 尝试1: fetch with credentials
         try {
-            response = await fetch(url, { credentials: 'include' });
-        } catch (e) {
-            // fetch 失败（跨域 CORS 或网络错误），改用 GM_xmlhttpRequest 绕过
+            const resp = await fetch(url, { credentials: 'include' });
+            text = await resp.text();
+            contentType = resp.headers.get('Content-Type') || '';
+        } catch (e1) {
+            // 尝试2: XHR（移动端最可靠）
             try {
-                const gmResp = await gmFetch(url, 'text');
-                return gmResp.responseText;
-            } catch (gmErr) {
-                // GM 也失败，最后尝试不带 credentials 的 fetch（部分移动端可能反而需要）
+                const xr = await xhrFetch(url);
+                text = xr.text; contentType = xr.contentType;
+            } catch (e2) {
+                // 尝试3: GM_xmlhttpRequest
                 try {
-                    const resp2 = await fetch(url);
-                    if (resp2.ok) return await resp2.text();
-                } catch (e3) { /* 忽略 */ }
-                console.error('[fetchTxtContent] 所有方式均失败:', url, gmErr);
-                throw new Error(`无法访问: ${url.substring(0, 80)}... (${gmErr.message})`);
+                    const gmResp = await gmFetch(url, 'text');
+                    text = gmResp.responseText; contentType = '';
+                } catch (e3) {
+                    // 尝试4: fetch without credentials
+                    try {
+                        const resp2 = await fetch(url);
+                        text = await resp2.text();
+                        contentType = resp2.headers.get('Content-Type') || '';
+                    } catch (e4) { /* 忽略 */ }
+                }
             }
         }
-        const contentType = response.headers.get('Content-Type') || '';
-        if (contentType.includes('text/html')) {
-            const html = await response.text();
-            const doc = new DOMParser().parseFromString(html, 'text/html');
+
+        if (!text && !contentType) {
+            console.error('[fetchTxtContent] 所有方式均失败:', url);
+            throw new Error(`无法访问: ${url.substring(0, 80)}...`);
+        }
+
+        if (contentType && contentType.includes('text/html')) {
+            const doc = new DOMParser().parseFromString(text, 'text/html');
             // 尝试在下载页中找真正的下载链接
             const dlLink = doc.querySelector('a[href*="aid="]') || doc.querySelector('a[download]');
             if (dlLink && dlLink.href !== url) {
@@ -1256,12 +1290,12 @@
             const bodyText = doc.body?.innerText?.trim();
             if (bodyText && bodyText.length < 100000) return bodyText;
             // 检测是否是登录页面（被重定向）
-            if (html.includes('登录') || html.includes('login') || doc.querySelector('form[action*="login"]')) {
+            if (text.includes('登录') || text.includes('login') || doc.querySelector('form[action*="login"]')) {
                 throw new Error('需要登录才能访问附件，请先在论坛登录');
             }
             return null;
         }
-        return await response.text();
+        return text;
     };
 
     const fetchAndExtractArchive = async (url, type) => {
