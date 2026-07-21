@@ -573,30 +573,41 @@
     // GM_xmlhttpRequest 封装 —— 绕过 CORS 限制 + 防盗链
     const gmFetch = (url, responseType = 'text') => new Promise((resolve, reject) => {
         console.log('[gmFetch] 尝试请求:', url);
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: url,
-            responseType: responseType,
-            timeout: responseType === 'blob' || responseType === 'arraybuffer' ? 60000 : 30000,
-            headers: {
-                'Referer': location.href,
-                'User-Agent': navigator.userAgent
-            },
-            cookie: document.cookie,
-            onload: (resp) => {
-                console.log('[gmFetch] 响应状态:', resp.status, 'URL:', url);
-                if (resp.status >= 200 && resp.status < 400) {
-                    resolve(resp);
-                } else {
-                    reject(new Error(`HTTP ${resp.status}`));
-                }
-            },
-            onerror: (err) => {
-                console.error('[gmFetch] 网络错误:', url, err);
-                reject(new Error('网络错误'));
-            },
-            ontimeout: () => reject(new Error('请求超时'))
-        });
+        const doRequest = (useCookie) => {
+            const opts = {
+                method: 'GET',
+                url: url,
+                responseType: responseType,
+                timeout: responseType === 'blob' || responseType === 'arraybuffer' ? 60000 : 30000,
+                headers: {
+                    'Referer': location.href,
+                    'User-Agent': navigator.userAgent
+                },
+                onload: (resp) => {
+                    console.log('[gmFetch] 响应状态:', resp.status, 'URL:', url);
+                    if (resp.status >= 200 && resp.status < 400) {
+                        resolve(resp);
+                    } else {
+                        reject(new Error(`HTTP ${resp.status}`));
+                    }
+                },
+                onerror: (err) => {
+                    console.error('[gmFetch] 网络错误:', url, err);
+                    if (useCookie) {
+                        console.log('[gmFetch] 带 cookie 失败，尝试不带 cookie...');
+                        doRequest(false);
+                    } else {
+                        reject(new Error('网络错误'));
+                    }
+                },
+                ontimeout: () => reject(new Error('请求超时'))
+            };
+            if (useCookie && document.cookie) {
+                opts.cookie = document.cookie;
+            }
+            GM_xmlhttpRequest(opts);
+        };
+        doRequest(true);
     });
 
     // ================= 115 网盘离线下载 API =================
@@ -1216,13 +1227,18 @@
     const fetchTxtContent = async (url) => {
         let response;
         try {
-            response = await fetch(url);
+            response = await fetch(url, { credentials: 'include' });
         } catch (e) {
             // fetch 失败（跨域 CORS 或网络错误），改用 GM_xmlhttpRequest 绕过
             try {
                 const gmResp = await gmFetch(url, 'text');
                 return gmResp.responseText;
             } catch (gmErr) {
+                // GM 也失败，最后尝试不带 credentials 的 fetch（部分移动端可能反而需要）
+                try {
+                    const resp2 = await fetch(url);
+                    if (resp2.ok) return await resp2.text();
+                } catch (e3) { /* 忽略 */ }
                 console.error('[fetchTxtContent] 所有方式均失败:', url, gmErr);
                 throw new Error(`无法访问: ${url.substring(0, 80)}... (${gmErr.message})`);
             }
@@ -1239,6 +1255,10 @@
             // 可能页面本身就是文本内容
             const bodyText = doc.body?.innerText?.trim();
             if (bodyText && bodyText.length < 100000) return bodyText;
+            // 检测是否是登录页面（被重定向）
+            if (html.includes('登录') || html.includes('login') || doc.querySelector('form[action*="login"]')) {
+                throw new Error('需要登录才能访问附件，请先在论坛登录');
+            }
             return null;
         }
         return await response.text();
