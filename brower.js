@@ -40,6 +40,8 @@
         autoExtractOnLoad: GM_getValue('custom_auto_extract', true),
         imageCount: GM_getValue('custom_image_count', 2),
         imageSize: GM_getValue('custom_image_size', '120px'),
+        imageDisplayMode: GM_getValue('custom_image_display_mode', 'stack'), // 'stack' | 'scroll' 图片展示方式
+        scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
         concurrentEnabled: GM_getValue('custom_concurrent_enabled', false),
         concurrentCount: GM_getValue('custom_concurrent_count', 3),
         concurrentDelay: GM_getValue('custom_concurrent_delay', 600),
@@ -1937,7 +1939,10 @@
         { val: '80px', label: '小 (80px)' },
         { val: '120px', label: '中 (120px)' },
         { val: '200px', label: '大 (200px)' },
-        { val: '300px', label: '超大 (300px)' }
+        { val: '300px', label: '超大 (300px)' },
+        { val: '500px', label: '特大 (500px)' },
+        { val: '700px', label: '巨大 (700px)' },
+        { val: '1000px', label: '原图级 (1000px)' }
     ];
     sizeOptions.forEach(opt => {
         const o = document.createElement('option');
@@ -1952,6 +1957,32 @@
     imgSizeRow.appendChild(imgSizeLabel);
     imgSizeRow.appendChild(imgSizeSelect);
     settingsPanel.appendChild(imgSizeRow);
+
+    // 图片展示方式
+    const imgDisplayModeRow = document.createElement('div');
+    imgDisplayModeRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const imgDisplayModeLabel = document.createElement('span');
+    imgDisplayModeLabel.innerText = '🖼️ 图片展示方式';
+    imgDisplayModeLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const imgDisplayModeSelect = document.createElement('select');
+    imgDisplayModeSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [
+        { value: 'stack', label: '纵向排列' },
+        { value: 'scroll', label: '横向滚动' }
+    ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.innerText = opt.label;
+        if (opt.value === STATE.imageDisplayMode) o.selected = true;
+        imgDisplayModeSelect.appendChild(o);
+    });
+    imgDisplayModeSelect.onchange = (e) => {
+        STATE.imageDisplayMode = e.target.value;
+        saveState('custom_image_display_mode', STATE.imageDisplayMode);
+        showToast('🖼️ 图片展示方式已切换，重新提取后生效', 'info');
+    };
+    imgDisplayModeRow.appendChild(imgDisplayModeLabel);
+    imgDisplayModeRow.appendChild(imgDisplayModeSelect);
+    settingsPanel.appendChild(imgDisplayModeRow);
 
     // 灯箱关闭按钮比例
     const lbRatioRow = document.createElement('div');
@@ -2667,6 +2698,28 @@
     logMaxRow.appendChild(logMaxSelect);
     settingsPanel.appendChild(logMaxRow);
 
+    // 滚动小球开关
+    const scrollBallToggleRow = document.createElement('div');
+    scrollBallToggleRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const scrollBallToggleLabel = document.createElement('span');
+    scrollBallToggleLabel.innerText = '🔽 显示滚动小球';
+    scrollBallToggleLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const scrollBallToggleSwitch = document.createElement('input');
+    scrollBallToggleSwitch.type = 'checkbox';
+    scrollBallToggleSwitch.checked = STATE.scrollBallEnabled;
+    scrollBallToggleSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    scrollBallToggleSwitch.onchange = (e) => {
+        STATE.scrollBallEnabled = e.target.checked;
+        saveState('custom_scroll_ball_enabled', STATE.scrollBallEnabled);
+        if (SCROLL_BALL) {
+            SCROLL_BALL.style.display = e.target.checked ? 'flex' : 'none';
+        }
+        showToast(e.target.checked ? '🔽 滚动小球已显示' : '🔽 滚动小球已隐藏', 'info');
+    };
+    scrollBallToggleRow.appendChild(scrollBallToggleLabel);
+    scrollBallToggleRow.appendChild(scrollBallToggleSwitch);
+    settingsPanel.appendChild(scrollBallToggleRow);
+
     // 滚动小球速度设置
     const scrollBallRow = document.createElement('div');
     scrollBallRow.style.cssText = 'padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
@@ -2784,7 +2837,20 @@
         // ---- 图片 ----
         if (data.images.length > 0) {
             const imgWrap = document.createElement('div');
-            imgWrap.innerHTML = data.images.map((src, i) => `<img src="${src}" data-idx="${i}" style="max-height:${STATE.imageSize}; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;">`).join('');
+            if (STATE.imageDisplayMode === 'scroll') {
+                // 横向滚动模式
+                imgWrap.style.cssText = 'overflow-x:auto; white-space:nowrap; padding:4px 0; -webkit-overflow-scrolling:touch;';
+                data.images.forEach((src, i) => {
+                    const img = document.createElement('img');
+                    img.src = src;
+                    img.dataset.idx = i;
+                    img.style.cssText = `max-height:${STATE.imageSize}; object-fit:cover; border-radius:4px; margin-right:6px; cursor:pointer; display:inline-block; vertical-align:top;`;
+                    imgWrap.appendChild(img);
+                });
+            } else {
+                // 默认纵向堆叠模式
+                imgWrap.innerHTML = data.images.map((src, i) => `<img src="${src}" data-idx="${i}" style="max-height:${STATE.imageSize}; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;">`).join('');
+            }
             imgWrap.addEventListener('click', (e) => {
                 if (e.target.tagName === 'IMG') {
                     e.preventDefault(); e.stopPropagation();
@@ -3036,7 +3102,7 @@
                 const openThreadBtn = document.createElement('button');
                 openThreadBtn.type = 'button';
                 openThreadBtn.innerText = '📂 打开帖子';
-                openThreadBtn.style.cssText = 'padding:12px 14px; font-size:14px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:nowrap; flex-shrink:0;';
+                openThreadBtn.style.cssText = 'flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;';
                 openThreadBtn.onclick = (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
                     GM_openInTab(threadUrl, { active: false, insert: true });
@@ -3950,6 +4016,8 @@
             highlighted: 'custom_highlight_keywords', readLinks: 'custom_read_links',
             autoLoadNextPage: 'custom_auto_load', autoExtractOnLoad: 'custom_auto_extract',
             imageCount: 'custom_image_count', imageSize: 'custom_image_size',
+            imageDisplayMode: 'custom_image_display_mode',
+            scrollBallEnabled: 'custom_scroll_ball_enabled',
             concurrentEnabled: 'custom_concurrent_enabled', concurrentCount: 'custom_concurrent_count',
             concurrentDelay: 'custom_concurrent_delay',
             offline115Cid: 'offline_115_cid', offline115CidName: 'offline_115_cid_name',
@@ -4941,8 +5009,9 @@
         window.addEventListener('wheel', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
         window.addEventListener('keydown', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
 
-        // 页面可滚动就显示
+        // 页面可滚动就显示（同时受开关控制）
         const _checkVisibility = () => {
+            if (!STATE.scrollBallEnabled) { b.style.display = 'none'; return; }
             if (document.body.scrollHeight > window.innerHeight * 1.2) {
                 b.style.display = 'flex';
             }
@@ -4959,7 +5028,7 @@
 
     // 面板右上角折叠按钮
     const minimizeBtn = document.createElement('div');
-    minimizeBtn.style.cssText = 'position:absolute; top:-12px; right:-12px; width:24px; height:24px; background:#dc3545; color:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:14px; box-shadow:0 2px 8px rgba(0,0,0,0.2); z-index:1;';
+    minimizeBtn.style.cssText = 'position:absolute; top:-16px; right:-16px; width:32px; height:32px; background:#dc3545; color:#fff; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:18px; box-shadow:0 2px 8px rgba(0,0,0,0.2); z-index:1;';
     minimizeBtn.innerText = '−';
     minimizeBtn.title = '折叠面板';
     minimizeBtn.style.position = 'fixed';
@@ -4982,8 +5051,8 @@
         if (panel.style.display === 'none') { minimizeBtn.style.display = 'none'; return; }
         const rect = panel.getBoundingClientRect();
         minimizeBtn.style.display = 'flex';
-        minimizeBtn.style.top = (rect.top - 12) + 'px';
-        minimizeBtn.style.left = (rect.right - 12) + 'px';
+        minimizeBtn.style.top = (rect.top - 16) + 'px';
+        minimizeBtn.style.left = (rect.right - 16) + 'px';
     };
     updateMinBtnPos();
     // 监听面板变化（简单轮询或用 ResizeObserver）
