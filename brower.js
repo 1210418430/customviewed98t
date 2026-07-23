@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.6
+// @version      15.7
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -1233,7 +1233,7 @@
                     skip();
                 }
             }
-        }
+}
 
         if (infoStart < 0) return { error: '种子文件中未找到 info 段' };
 
@@ -1248,8 +1248,9 @@
         return { magnet: `magnet:?xt=urn:btih:${hashHex}` };
     };
 
-    const fetchTxtContent = async (url) => {
-        // XHR 请求（移动端最可靠，且可自定义 Referer）
+    const fetchTxtContent = async (url, referer) => {
+        const ref = referer || location.href;
+        // XHR 请求
         const xhrFetch = (u) => new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open('GET', u, true);
@@ -1257,7 +1258,7 @@
             xhr.timeout = 45000;
             xhr.withCredentials = true;
             xhr.setRequestHeader('Accept', 'text/plain, */*');
-            try { xhr.setRequestHeader('Referer', location.href); } catch(e) {}
+            try { xhr.setRequestHeader('Referer', ref); } catch(e) {}
             xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 400) {
                     resolve({ text: xhr.responseText, contentType: xhr.getResponseHeader('Content-Type') || '' });
@@ -2902,7 +2903,7 @@
     settingsPanel.appendChild(createKeywordManager('⭐ 高亮标题关键词', STATE.highlighted, 'custom_highlight_keywords', '输入标题关键词'));
 
     const btnGroup = document.createElement('div');
-    btnGroup.style.cssText = 'display: flex; flex-direction: column; gap: 10px; width: 100%;';
+    btnGroup.style.cssText = 'display: flex; flex-direction: column; gap: 14px; width: 100%;';
 
     const createBtn = (text, bgColor) => {
         const b = document.createElement('button');
@@ -3185,7 +3186,7 @@
                 const bmRow = document.createElement('div');
                 const isCircle = STATE.buttonStyle === 'circle';
                 bmRow.style.cssText = isCircle
-                    ? 'display:flex; gap:10px; margin-top:8px; max-width:100%; justify-content:center;'
+                    ? 'display:flex; gap:18px; margin-top:12px; max-width:100%; justify-content:center; padding:6px 0;'
                     : 'display:flex; gap:6px; margin-top:8px; max-width:100%; min-width:0;';
                 const _mkBmBtn = (type, label, bgColor, icon) => {
                     const _curType = getBookmarkType(_bmTid);
@@ -3194,7 +3195,7 @@
                     if (isCircle) {
                         btn.innerHTML = `<span style="font-size:28px; line-height:1;">${icon}</span>`;
                         btn.title = label;
-                        btn.style.cssText = `width:64px; height:64px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:50%; font-weight:bold; opacity:${_curType === type ? '1' : '0.45'}; transition:all 0.15s; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 3px 10px rgba(0,0,0,0.2);`;
+                        btn.style.cssText = `width:80px; height:80px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:50%; font-weight:bold; opacity:${_curType === type ? '1' : '0.45'}; transition:all 0.15s; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 4px 14px rgba(0,0,0,0.25);`;
                     } else {
                         btn.innerText = label;
                         btn.style.cssText = `flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.55'}; transition:opacity 0.15s; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;`;
@@ -3230,7 +3231,7 @@
                 if (isCircle) {
                     openThreadBtn.innerHTML = '<span style="font-size:28px; line-height:1;">📂</span>';
                     openThreadBtn.title = '打开帖子';
-                    openThreadBtn.style.cssText = 'width:64px; height:64px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:50%; font-weight:bold; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 3px 10px rgba(0,0,0,0.2); transition:transform 0.15s;';
+                    openThreadBtn.style.cssText = 'width:80px; height:80px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:50%; font-weight:bold; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 4px 14px rgba(0,0,0,0.25); transition:transform 0.15s;';
                     openThreadBtn.onmouseover = () => { openThreadBtn.style.transform = 'scale(1.1)'; };
                     openThreadBtn.onmouseout = () => { openThreadBtn.style.transform = ''; };
                 } else {
@@ -3240,7 +3241,14 @@
                 openThreadBtn.onclick = (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
                     GM_openInTab(threadUrl, { active: false, insert: true });
-                    showToast('📂 已在新标签页打开帖子', 'success');
+                    // 在按钮附近显示大号提示
+                    const rect = openThreadBtn.getBoundingClientRect();
+                    const toast = document.createElement('div');
+                    toast.style.cssText = `position:fixed; z-index:300001; background:#28a745; color:#fff; padding:10px 20px; border-radius:8px; font-size:18px; font-weight:bold; box-shadow:0 4px 12px rgba(0,0,0,0.3); transition:opacity 0.4s; pointer-events:none; left:${rect.left + rect.width/2}px; top:${rect.top - 50}px; transform:translate(-50%, 0); white-space:nowrap;`;
+                    toast.innerText = '✅ 已打开';
+                    document.body.appendChild(toast);
+                    setTimeout(() => { toast.style.opacity = '0'; }, 2000);
+                    setTimeout(() => { toast.remove(); }, 2500);
                 };
                 bmRow.appendChild(openThreadBtn);
                 box.appendChild(bmRow);
@@ -3263,7 +3271,7 @@
         const allTexts = [];
         for (const txt of data.txts) {
             try {
-                const content = await fetchTxtContent(txt.href);
+                const content = await fetchTxtContent(txt.href, threadUrl);
                 if (content) allTexts.push({ name: txt.name, content });
             } catch (err) {
                 allTexts.push({ name: txt.name, content: `[读取失败: ${err.message}]` });
@@ -4262,6 +4270,27 @@
     };
 
     btnGroup.appendChild(btnToggleSet);
+
+    // 一键备份按钮（小号，放在设置按钮下方）
+    const btnBackupRow = document.createElement('div');
+    btnBackupRow.style.cssText = 'display:flex; gap:6px;';
+    const makeSmallBtn = (text, bg, onClick) => {
+        const b = document.createElement('button');
+        b.innerText = text;
+        b.style.cssText = `flex:1; padding:5px 4px; background:${bg}; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:11px; font-weight:bold;`;
+        b.onclick = onClick;
+        return b;
+    };
+    btnBackupRow.appendChild(makeSmallBtn('☁️ 备份收藏', '#17a2b8', () => {
+        if (!STATE.gistToken) { showToast('请先在设置中配置 GitHub Token', 'error'); return; }
+        gistBookmarksBackup(false);
+    }));
+    btnBackupRow.appendChild(makeSmallBtn('☁️ 备份隐藏', '#6f42c1', () => {
+        if (!STATE.gistToken) { showToast('请先在设置中配置 GitHub Token', 'error'); return; }
+        gistBackup();
+    }));
+    btnGroup.appendChild(btnBackupRow);
+
     btnGroup.appendChild(btnSelectAll);
 
     // 一次性加载多页按钮
