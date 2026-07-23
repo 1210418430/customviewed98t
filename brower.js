@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.5
+// @version      15.6
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -42,6 +42,7 @@
         imageCount: GM_getValue('custom_image_count', 2),
         imageSize: GM_getValue('custom_image_size', '120px'),
         imageDisplayMode: GM_getValue('custom_image_display_mode', 'stack'), // 'stack' | 'scroll' 图片展示方式
+        buttonStyle: GM_getValue('custom_button_style', 'rect'), // 'rect' | 'circle' 收藏/打开按钮样式
         scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
         concurrentEnabled: GM_getValue('custom_concurrent_enabled', false),
         concurrentCount: GM_getValue('custom_concurrent_count', 3),
@@ -2068,6 +2069,32 @@
     imgDisplayModeRow.appendChild(imgDisplayModeSelect);
     settingsPanel.appendChild(imgDisplayModeRow);
 
+    // 收藏/打开按钮样式
+    const btnStyleRow = document.createElement('div');
+    btnStyleRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const btnStyleLabel = document.createElement('span');
+    btnStyleLabel.innerText = '🔘 帖子操作按钮样式';
+    btnStyleLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const btnStyleSelect = document.createElement('select');
+    btnStyleSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [
+        { value: 'rect', label: '矩形按钮（默认）' },
+        { value: 'circle', label: '圆形大按钮' }
+    ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.innerText = opt.label;
+        if (opt.value === STATE.buttonStyle) o.selected = true;
+        btnStyleSelect.appendChild(o);
+    });
+    btnStyleSelect.onchange = (e) => {
+        STATE.buttonStyle = e.target.value;
+        saveState('custom_button_style', STATE.buttonStyle);
+        showToast('🔘 按钮样式已切换，重新提取后生效', 'info');
+    };
+    btnStyleRow.appendChild(btnStyleLabel);
+    btnStyleRow.appendChild(btnStyleSelect);
+    settingsPanel.appendChild(btnStyleRow);
+
     // 灯箱关闭按钮比例
     const lbRatioRow = document.createElement('div');
     lbRatioRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
@@ -3156,37 +3183,60 @@
                     return link ? link.innerText.trim() : threadUrl;
                 })();
                 const bmRow = document.createElement('div');
-                bmRow.style.cssText = 'display:flex; gap:6px; margin-top:8px; max-width:100%; min-width:0;';
-                const _mkBmBtn = (type, label, bgColor) => {
+                const isCircle = STATE.buttonStyle === 'circle';
+                bmRow.style.cssText = isCircle
+                    ? 'display:flex; gap:10px; margin-top:8px; max-width:100%; justify-content:center;'
+                    : 'display:flex; gap:6px; margin-top:8px; max-width:100%; min-width:0;';
+                const _mkBmBtn = (type, label, bgColor, icon) => {
                     const _curType = getBookmarkType(_bmTid);
                     const btn = document.createElement('button');
                     btn.type = 'button';
-                    btn.innerText = label;
-                    btn.style.cssText = `flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.55'}; transition:opacity 0.15s; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;`;
-                    btn.onmouseover = () => { btn.style.opacity = '1'; };
-                    btn.onmouseout = () => { if (getBookmarkType(_bmTid) !== type) btn.style.opacity = '0.55'; };
+                    if (isCircle) {
+                        btn.innerHTML = `<span style="font-size:28px; line-height:1;">${icon}</span>`;
+                        btn.title = label;
+                        btn.style.cssText = `width:64px; height:64px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:50%; font-weight:bold; opacity:${_curType === type ? '1' : '0.45'}; transition:all 0.15s; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 3px 10px rgba(0,0,0,0.2);`;
+                    } else {
+                        btn.innerText = label;
+                        btn.style.cssText = `flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.55'}; transition:opacity 0.15s; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;`;
+                    }
+                    btn.onmouseover = () => { btn.style.opacity = '1'; btn.style.transform = isCircle ? 'scale(1.1)' : ''; };
+                    btn.onmouseout = () => { if (getBookmarkType(_bmTid) !== type) btn.style.opacity = isCircle ? '0.45' : '0.55'; btn.style.transform = ''; };
                     btn.onclick = (ev) => {
                         ev.preventDefault(); ev.stopPropagation();
                         if (isBookmarked(_bmTid) && getBookmarkType(_bmTid) === type) {
                             removeBookmark(_bmTid);
                             showToast('已取消收藏', 'info');
-                            bmRow.querySelectorAll('button').forEach(b => { b.style.opacity = '0.55'; });
+                            bmRow.querySelectorAll('button').forEach(b => {
+                                const bmType = b.dataset.bmType;
+                                if (bmType) b.style.opacity = isCircle ? '0.45' : '0.55';
+                            });
                         } else {
                             const result = addBookmark(_bmTid, _bmTitle, threadUrl, type);
                             showToast(result === 'updated' ? `已更新收藏为${type === 'important' ? '重要' : '一般'}` : `已收藏为${type === 'important' ? '重要⭐' : '一般📌'}`, 'success');
-                            bmRow.querySelectorAll('button').forEach(b => { b.style.opacity = b.dataset.bmType === type ? '1' : '0.55'; });
+                            bmRow.querySelectorAll('button').forEach(b => {
+                                const bmType = b.dataset.bmType;
+                                if (bmType) b.style.opacity = bmType === type ? '1' : (isCircle ? '0.45' : '0.55');
+                            });
                         }
                         updateListBmBtns();
                     };
                     btn.dataset.bmType = type;
                     return btn;
                 };
-                bmRow.appendChild(_mkBmBtn('important', '⭐ 收藏为重要帖子', '#dc3545'));
-                bmRow.appendChild(_mkBmBtn('normal', '📌 收藏为一般帖子', '#007bff'));
+                bmRow.appendChild(_mkBmBtn('important', '收藏为重要帖子', '#dc3545', '⭐'));
+                bmRow.appendChild(_mkBmBtn('normal', '收藏为一般帖子', '#007bff', '📌'));
                 const openThreadBtn = document.createElement('button');
                 openThreadBtn.type = 'button';
-                openThreadBtn.innerText = '📂 打开帖子';
-                openThreadBtn.style.cssText = 'flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;';
+                if (isCircle) {
+                    openThreadBtn.innerHTML = '<span style="font-size:28px; line-height:1;">📂</span>';
+                    openThreadBtn.title = '打开帖子';
+                    openThreadBtn.style.cssText = 'width:64px; height:64px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:50%; font-weight:bold; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 3px 10px rgba(0,0,0,0.2); transition:transform 0.15s;';
+                    openThreadBtn.onmouseover = () => { openThreadBtn.style.transform = 'scale(1.1)'; };
+                    openThreadBtn.onmouseout = () => { openThreadBtn.style.transform = ''; };
+                } else {
+                    openThreadBtn.innerText = '📂 打开帖子';
+                    openThreadBtn.style.cssText = 'flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;';
+                }
                 openThreadBtn.onclick = (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
                     GM_openInTab(threadUrl, { active: false, insert: true });
@@ -4102,6 +4152,7 @@
             autoLoadNextPage: 'custom_auto_load', autoExtractOnLoad: 'custom_auto_extract',
             imageCount: 'custom_image_count', imageSize: 'custom_image_size',
             imageDisplayMode: 'custom_image_display_mode',
+            buttonStyle: 'custom_button_style',
             scrollBallEnabled: 'custom_scroll_ball_enabled',
             concurrentEnabled: 'custom_concurrent_enabled', concurrentCount: 'custom_concurrent_count',
             concurrentDelay: 'custom_concurrent_delay',
@@ -4695,6 +4746,8 @@
 
     // 更新列表页收藏按钮状态（删除/添加收藏后刷新星标透明度）
     const updateListBmBtns = () => {
+        const isCircle = STATE.buttonStyle === 'circle';
+        const inactiveOpacity = isCircle ? '0.45' : '0.55';
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
             const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
             if (!link) return;
@@ -4703,7 +4756,7 @@
             const curType = getBookmarkType(tid);
             // 提取区内的收藏按钮
             tbody.querySelectorAll('.custom-extracted button[data-bm-type]').forEach(btn => {
-                btn.style.opacity = btn.dataset.bmType === curType ? '1' : '0.55';
+                btn.style.opacity = btn.dataset.bmType === curType ? '1' : inactiveOpacity;
             });
         });
     };
