@@ -240,6 +240,25 @@
             line-height: 1.4; white-space: nowrap;
         }
         .custom-persistent-toast .pt-btn:hover { background: rgba(255,255,255,0.2); }
+        /* 移动端：标题列最小宽度防止塌缩 */
+        @media (max-width: 768px) {
+            tbody[id^="normalthread_"] th { min-width: 120px; }
+            tbody[id^="normalthread_"] th a.xst,
+            tbody[id^="normalthread_"] th a[href*="thread-"] {
+                word-break: break-word; white-space: normal;
+            }
+            /* 提取区图片适配移动端宽度 */
+            .custom-extracted img {
+                max-width: 100% !important; height: auto !important;
+            }
+            .custom-extracted {
+                padding-left: 8px !important;
+            }
+            /* 按钮行移动端不换行溢出处理 */
+            .custom-extracted > div[style*="display:flex"] {
+                flex-wrap: wrap !important;
+            }
+        }
     `);
 
     const tooltip = document.createElement('div');
@@ -1235,6 +1254,7 @@
             xhr.open('GET', u, true);
             xhr.responseType = 'text';
             xhr.timeout = 30000;
+            xhr.withCredentials = true;
             xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 400) {
                     resolve({ text: xhr.responseText, contentType: xhr.getResponseHeader('Content-Type') || '' });
@@ -2899,12 +2919,12 @@
                     const img = document.createElement('img');
                     img.src = src;
                     img.dataset.idx = i;
-                    img.style.cssText = `max-height:${STATE.imageSize}; object-fit:cover; border-radius:4px; margin-right:6px; cursor:pointer; display:inline-block; vertical-align:top;`;
+                    img.style.cssText = `max-height:${STATE.imageSize}; max-width:100%; object-fit:cover; border-radius:4px; margin-right:6px; cursor:pointer; display:inline-block; vertical-align:top;`;
                     imgWrap.appendChild(img);
                 });
             } else {
                 // 默认纵向堆叠模式
-                imgWrap.innerHTML = data.images.map((src, i) => `<img src="${src}" data-idx="${i}" style="max-height:${STATE.imageSize}; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;">`).join('');
+                imgWrap.innerHTML = data.images.map((src, i) => `<img src="${src}" data-idx="${i}" style="max-height:${STATE.imageSize}; max-width:100%; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;">`).join('');
             }
             imgWrap.addEventListener('click', (e) => {
                 if (e.target.tagName === 'IMG') {
