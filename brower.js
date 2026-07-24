@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.7
+// @version      15.8
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -44,6 +44,7 @@
         imageDisplayMode: GM_getValue('custom_image_display_mode', 'stack'), // 'stack' | 'scroll' 图片展示方式
         buttonStyle: GM_getValue('custom_button_style', 'rect'), // 'rect' | 'circle' 收藏/打开按钮样式
         scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
+        scrollJumpAmount: GM_getValue('custom_scroll_jump_amount', '2/3'), // '1' | '2/3' | '1/2' 快捷跳转量
         concurrentEnabled: GM_getValue('custom_concurrent_enabled', false),
         concurrentCount: GM_getValue('custom_concurrent_count', 3),
         concurrentDelay: GM_getValue('custom_concurrent_delay', 600),
@@ -2832,6 +2833,32 @@
     scrollBallToggleRow.appendChild(scrollBallToggleSwitch);
     settingsPanel.appendChild(scrollBallToggleRow);
 
+    // 快捷跳转量设置
+    const scrollJumpRow = document.createElement('div');
+    scrollJumpRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const scrollJumpLabel = document.createElement('span');
+    scrollJumpLabel.innerText = '⬆⬇ 快捷跳转量 / Z/X键';
+    scrollJumpLabel.style.cssText = 'font-size: 12px; font-weight: bold; color: #333;';
+    const scrollJumpSelect = document.createElement('select');
+    scrollJumpSelect.style.cssText = 'cursor: pointer; font-size: 11px; padding: 2px;';
+    [
+        { value: '2/3', label: '2/3 屏幕' },
+        { value: '1', label: '1 个屏幕' },
+        { value: '1/2', label: '1/2 屏幕' }
+    ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.innerText = opt.label;
+        if (opt.value === STATE.scrollJumpAmount) o.selected = true;
+        scrollJumpSelect.appendChild(o);
+    });
+    scrollJumpSelect.onchange = (e) => {
+        STATE.scrollJumpAmount = e.target.value;
+        saveState('custom_scroll_jump_amount', STATE.scrollJumpAmount);
+    };
+    scrollJumpRow.appendChild(scrollJumpLabel);
+    scrollJumpRow.appendChild(scrollJumpSelect);
+    settingsPanel.appendChild(scrollJumpRow);
+
     // 滚动小球速度设置
     const scrollBallRow = document.createElement('div');
     scrollBallRow.style.cssText = 'padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
@@ -4162,6 +4189,7 @@
             imageDisplayMode: 'custom_image_display_mode',
             buttonStyle: 'custom_button_style',
             scrollBallEnabled: 'custom_scroll_ball_enabled',
+            scrollJumpAmount: 'custom_scroll_jump_amount',
             concurrentEnabled: 'custom_concurrent_enabled', concurrentCount: 'custom_concurrent_count',
             concurrentDelay: 'custom_concurrent_delay',
             offline115Cid: 'offline_115_cid', offline115CidName: 'offline_115_cid_name',
@@ -5176,6 +5204,25 @@
         window.addEventListener('wheel', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
         window.addEventListener('keydown', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
 
+        // 键盘快捷键：Z 向上跳转，X 向下跳转
+        window.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+            const key = e.key.toLowerCase();
+            let dir = 0;
+            if (key === 'z') dir = -1;
+            else if (key === 'x') dir = 1;
+            else return;
+            e.preventDefault();
+            const h = window.innerHeight;
+            let px;
+            switch (STATE.scrollJumpAmount) {
+                case '1': px = h; break;
+                case '1/2': px = h / 2; break;
+                case '2/3': default: px = h * 2 / 3; break;
+            }
+            window.scrollBy({ top: px * dir, behavior: 'smooth' });
+        });
+
         // 页面可滚动就显示（同时受开关控制）
         const _checkVisibility = () => {
             if (!STATE.scrollBallEnabled) { b.style.display = 'none'; return; }
@@ -5192,6 +5239,51 @@
         return b;
     })();
     document.body.appendChild(SCROLL_BALL);
+
+    // ================= 快捷跳转按钮（滚动小球右侧上下按钮） =================
+    (() => {
+        const JSIZE = 88, JGAP = 6;
+        const getJumpPx = () => {
+            const h = window.innerHeight;
+            switch (STATE.scrollJumpAmount) {
+                case '1': return h;
+                case '1/2': return h / 2;
+                case '2/3': default: return h * 2 / 3;
+            }
+        };
+        const mkJumpBtn = (label, dir, topOffset) => {
+            const btn = document.createElement('div');
+            btn.style.cssText = `position:fixed;z-index:150000;width:${JSIZE}px;height:${JSIZE}px;border-radius:50%;background:rgba(40,167,69,0.82);color:#fff;display:none;align-items:center;justify-content:center;cursor:pointer;font-size:22px;font-weight:bold;box-shadow:0 6px 20px rgba(0,0,0,0.3);user-select:none;transition:background 0.15s;`;
+            btn.innerHTML = label;
+            btn.title = dir > 0 ? '向下跳转' : '向上跳转';
+            // 位置同步到滚动小球右侧
+            const syncPos = () => {
+                const ball = SCROLL_BALL;
+                if (!ball || ball.style.display === 'none') { btn.style.display = 'none'; return; }
+                if (!STATE.scrollBallEnabled) { btn.style.display = 'none'; return; }
+                btn.style.display = 'flex';
+                const bl = ball.offsetLeft, bt = ball.offsetTop;
+                btn.style.left = (bl + 88 + 10) + 'px';
+                btn.style.top = (bt + topOffset) + 'px';
+            };
+            btn.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                window.scrollBy({ top: getJumpPx() * dir, behavior: 'smooth' });
+            });
+            return { btn, syncPos };
+        };
+        const upBtn = mkJumpBtn('⬆', -1, 0);
+        const dnBtn = mkJumpBtn('⬇', 1, 88 + JGAP);
+        document.body.appendChild(upBtn.btn);
+        document.body.appendChild(dnBtn.btn);
+        // 初始同步 & 持续监听
+        setTimeout(() => { upBtn.syncPos(); dnBtn.syncPos(); }, 500);
+        window.addEventListener('scroll', () => { upBtn.syncPos(); dnBtn.syncPos(); }, { passive: true });
+        window.addEventListener('resize', () => { upBtn.syncPos(); dnBtn.syncPos(); });
+        new MutationObserver(() => { upBtn.syncPos(); dnBtn.syncPos(); }).observe(document.body, { childList: true, subtree: true });
+        // 暴露给键盘快捷键使用
+        window._customJumpBtns = { getJumpPx };
+    })();
 
     // 面板右上角折叠按钮
     const minimizeBtn = document.createElement('div');
