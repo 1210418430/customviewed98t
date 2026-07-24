@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.9
+// @version      15.10
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -46,6 +46,9 @@
         scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
         scrollJumpAmount: GM_getValue('custom_scroll_jump_amount', '2/3'), // '1' | '2/3' | '1/2' 快捷跳转量
         scrollJumpMode: GM_getValue('custom_scroll_jump_mode', 'zx'), // 'zx' | 'mouse' 快捷跳转方式
+        scrollJumpMouseHold: GM_getValue('custom_scroll_jump_mouse_hold', 'smooth'), // 'jump' | 'smooth' | 'interval' 鼠标长按模式
+        scrollJumpMouseSpeed: GM_getValue('custom_scroll_jump_mouse_speed', 400), // 平滑滚动速度 px/s
+        scrollJumpMouseInterval: GM_getValue('custom_scroll_jump_mouse_interval', 500), // 间隔模式 ms
         concurrentEnabled: GM_getValue('custom_concurrent_enabled', false),
         concurrentCount: GM_getValue('custom_concurrent_count', 3),
         concurrentDelay: GM_getValue('custom_concurrent_delay', 600),
@@ -2880,11 +2883,87 @@
     scrollJumpModeSelect.onchange = (e) => {
         STATE.scrollJumpMode = e.target.value;
         saveState('custom_scroll_jump_mode', STATE.scrollJumpMode);
+        const showMouse = e.target.value === 'mouse';
+        scrollJumpMouseHoldRow.style.display = showMouse ? 'flex' : 'none';
+        scrollJumpMouseSpeedRow.style.display = (showMouse && STATE.scrollJumpMouseHold === 'smooth') ? 'flex' : 'none';
+        scrollJumpMouseIntervalRow.style.display = (showMouse && STATE.scrollJumpMouseHold === 'interval') ? 'flex' : 'none';
         showToast('⌨️🖱️ 快捷跳转方式已切换为：' + scrollJumpModeSelect.selectedOptions[0].innerText + '（需刷新页面生效）', 'info');
     };
     scrollJumpModeRow.appendChild(scrollJumpModeLabel);
     scrollJumpModeRow.appendChild(scrollJumpModeSelect);
     settingsPanel.appendChild(scrollJumpModeRow);
+
+    // 鼠标侧键长按模式（仅在鼠标模式时显示）
+    const scrollJumpMouseHoldRow = document.createElement('div');
+    scrollJumpMouseHoldRow.style.cssText = `display: ${STATE.scrollJumpMode === 'mouse' ? 'flex' : 'none'}; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;`;
+    const scrollJumpMouseHoldLabel = document.createElement('span');
+    scrollJumpMouseHoldLabel.innerText = '🖱️ 长按侧键行为';
+    scrollJumpMouseHoldLabel.style.cssText = 'font-size: 12px; font-weight: bold; color: #333;';
+    const scrollJumpMouseHoldSelect = document.createElement('select');
+    scrollJumpMouseHoldSelect.style.cssText = 'cursor: pointer; font-size: 11px; padding: 2px; max-width: 130px;';
+    [
+        { value: 'jump', label: '单次跳转' },
+        { value: 'smooth', label: '平滑滚动' },
+        { value: 'interval', label: '间隔滚动' }
+    ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.innerText = opt.label;
+        if (opt.value === STATE.scrollJumpMouseHold) o.selected = true;
+        scrollJumpMouseHoldSelect.appendChild(o);
+    });
+    scrollJumpMouseHoldSelect.onchange = (e) => {
+        STATE.scrollJumpMouseHold = e.target.value;
+        saveState('custom_scroll_jump_mouse_hold', STATE.scrollJumpMouseHold);
+        scrollJumpMouseSpeedRow.style.display = e.target.value === 'smooth' ? 'flex' : 'none';
+        scrollJumpMouseIntervalRow.style.display = e.target.value === 'interval' ? 'flex' : 'none';
+    };
+    scrollJumpMouseHoldRow.appendChild(scrollJumpMouseHoldLabel);
+    scrollJumpMouseHoldRow.appendChild(scrollJumpMouseHoldSelect);
+    settingsPanel.appendChild(scrollJumpMouseHoldRow);
+
+    // 平滑滚动速度（仅平滑模式显示）
+    const scrollJumpMouseSpeedRow = document.createElement('div');
+    scrollJumpMouseSpeedRow.style.cssText = `display: ${STATE.scrollJumpMode === 'mouse' && STATE.scrollJumpMouseHold === 'smooth' ? 'flex' : 'none'}; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;`;
+    const scrollJumpMouseSpeedLabel = document.createElement('span');
+    scrollJumpMouseSpeedLabel.innerText = '🖱️ 长按平滑速度';
+    scrollJumpMouseSpeedLabel.style.cssText = 'font-size: 12px; font-weight: bold; color: #333;';
+    const scrollJumpMouseSpeedSelect = document.createElement('select');
+    scrollJumpMouseSpeedSelect.style.cssText = 'cursor: pointer; font-size: 11px; padding: 2px;';
+    [200, 300, 400, 500, 600, 800, 1000, 1500].forEach(n => {
+        const o = document.createElement('option');
+        o.value = n; o.innerText = n + ' px/s';
+        if (n === STATE.scrollJumpMouseSpeed) o.selected = true;
+        scrollJumpMouseSpeedSelect.appendChild(o);
+    });
+    scrollJumpMouseSpeedSelect.onchange = (e) => {
+        STATE.scrollJumpMouseSpeed = parseInt(e.target.value);
+        saveState('custom_scroll_jump_mouse_speed', STATE.scrollJumpMouseSpeed);
+    };
+    scrollJumpMouseSpeedRow.appendChild(scrollJumpMouseSpeedLabel);
+    scrollJumpMouseSpeedRow.appendChild(scrollJumpMouseSpeedSelect);
+    settingsPanel.appendChild(scrollJumpMouseSpeedRow);
+
+    // 间隔时间（仅间隔模式显示）
+    const scrollJumpMouseIntervalRow = document.createElement('div');
+    scrollJumpMouseIntervalRow.style.cssText = `display: ${STATE.scrollJumpMode === 'mouse' && STATE.scrollJumpMouseHold === 'interval' ? 'flex' : 'none'}; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;`;
+    const scrollJumpMouseIntervalLabel = document.createElement('span');
+    scrollJumpMouseIntervalLabel.innerText = '🖱️ 长按间隔时间';
+    scrollJumpMouseIntervalLabel.style.cssText = 'font-size: 12px; font-weight: bold; color: #333;';
+    const scrollJumpMouseIntervalSelect = document.createElement('select');
+    scrollJumpMouseIntervalSelect.style.cssText = 'cursor: pointer; font-size: 11px; padding: 2px;';
+    [300, 400, 500, 600, 800, 1000, 1500].forEach(n => {
+        const o = document.createElement('option');
+        o.value = n; o.innerText = (n / 1000).toFixed(1) + ' 秒';
+        if (n === STATE.scrollJumpMouseInterval) o.selected = true;
+        scrollJumpMouseIntervalSelect.appendChild(o);
+    });
+    scrollJumpMouseIntervalSelect.onchange = (e) => {
+        STATE.scrollJumpMouseInterval = parseInt(e.target.value);
+        saveState('custom_scroll_jump_mouse_interval', STATE.scrollJumpMouseInterval);
+    };
+    scrollJumpMouseIntervalRow.appendChild(scrollJumpMouseIntervalLabel);
+    scrollJumpMouseIntervalRow.appendChild(scrollJumpMouseIntervalSelect);
+    settingsPanel.appendChild(scrollJumpMouseIntervalRow);
 
     // 滚动小球速度设置
     const scrollBallRow = document.createElement('div');
@@ -4218,6 +4297,9 @@
             scrollBallEnabled: 'custom_scroll_ball_enabled',
             scrollJumpAmount: 'custom_scroll_jump_amount',
             scrollJumpMode: 'custom_scroll_jump_mode',
+            scrollJumpMouseHold: 'custom_scroll_jump_mouse_hold',
+            scrollJumpMouseSpeed: 'custom_scroll_jump_mouse_speed',
+            scrollJumpMouseInterval: 'custom_scroll_jump_mouse_interval',
             concurrentEnabled: 'custom_concurrent_enabled', concurrentCount: 'custom_concurrent_count',
             concurrentDelay: 'custom_concurrent_delay',
             offline115Cid: 'offline_115_cid', offline115CidName: 'offline_115_cid_name',
@@ -5257,7 +5339,49 @@
             execScrollJump(dir);
         });
 
-        // 鼠标侧边键：后退键(Mouse4/button=3) 向上，前进键(Mouse5/button=4) 向下
+        // ---- 鼠标侧键：长按连续滚动 ----
+        let _mouseJumpDir = 0;      // -1=上, 0=无, 1=下
+        let _mouseJumpRaf = null;   // smooth 模式 rAF
+        let _mouseJumpTimer = null; // interval 模式定时器
+
+        const _stopMouseJump = () => {
+            _mouseJumpDir = 0;
+            if (_mouseJumpRaf) { cancelAnimationFrame(_mouseJumpRaf); _mouseJumpRaf = null; }
+            if (_mouseJumpTimer) { clearInterval(_mouseJumpTimer); _mouseJumpTimer = null; }
+        };
+
+        const _startMouseJump = (dir) => {
+            _stopMouseJump();
+            _mouseJumpDir = dir;
+            const hold = STATE.scrollJumpMouseHold || 'smooth';
+
+            if (hold === 'jump') {
+                // 单次跳转：mousedown 时跳一次，不再持续
+                execScrollJump(dir);
+            } else if (hold === 'smooth') {
+                // 平滑滚动：rAF 循环
+                const speed = STATE.scrollJumpMouseSpeed || 400;
+                let lastTime = performance.now();
+                const step = (now) => {
+                    if (_mouseJumpDir === 0) return;
+                    const dt = (now - lastTime) / 1000;
+                    lastTime = now;
+                    const px = speed * dt * _mouseJumpDir;
+                    window.scrollBy(0, px);
+                    _mouseJumpRaf = requestAnimationFrame(step);
+                };
+                _mouseJumpRaf = requestAnimationFrame(step);
+            } else if (hold === 'interval') {
+                // 间隔模式：先跳一次，然后定时跳
+                execScrollJump(dir);
+                const interval = STATE.scrollJumpMouseInterval || 500;
+                _mouseJumpTimer = setInterval(() => {
+                    if (_mouseJumpDir === 0) { _stopMouseJump(); return; }
+                    execScrollJump(_mouseJumpDir);
+                }, interval);
+            }
+        };
+
         window.addEventListener('mousedown', (e) => {
             if (STATE.scrollJumpMode !== 'mouse') return;
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
@@ -5267,15 +5391,15 @@
             else return;
             e.preventDefault();
             e.stopPropagation();
-            execScrollJump(dir);
+            _startMouseJump(dir);
         }, true);
 
-        // 同时拦截 mouseup 防止浏览器触发前进/后退导航
         window.addEventListener('mouseup', (e) => {
             if (STATE.scrollJumpMode !== 'mouse') return;
             if (e.button === 3 || e.button === 4) {
                 e.preventDefault();
                 e.stopPropagation();
+                _stopMouseJump();
             }
         }, true);
 
