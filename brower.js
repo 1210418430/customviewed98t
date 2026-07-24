@@ -1540,6 +1540,48 @@
         observer.observe(threadListContainer, { childList: true, subtree: true });
     }
 
+    // 修复表格列宽：插入 <colgroup> 避免第一页全部隐藏时 table-layout:fixed 列宽塌缩
+    const fixTableColumnWidths = () => {
+        const table = threadListContainer;
+        if (!table || table.tagName !== 'TABLE') return;
+
+        // 找任意帖子行（含隐藏的）确定列结构
+        const anyRow = table.querySelector('tbody[id^="normalthread_"] tr');
+        if (!anyRow) return;
+
+        // 移除旧的修复
+        const oldColgroup = table.querySelector('colgroup[data-custom-colgroup]');
+        if (oldColgroup) oldColgroup.remove();
+
+        const cells = anyRow.children;
+        const colgroup = document.createElement('colgroup');
+        colgroup.setAttribute('data-custom-colgroup', '1');
+
+        // Discuz! 预设列宽映射
+        const CLASS_WIDTHS = {
+            icn: '25px',
+            by: '105px',
+            num: '60px',
+            frm: '150px',
+            o: '20px'
+        };
+
+        for (const cell of cells) {
+            const col = document.createElement('col');
+            for (const [cls, w] of Object.entries(CLASS_WIDTHS)) {
+                if (cell.classList.contains(cls)) {
+                    col.style.width = w;
+                    break;
+                }
+            }
+            // .common / th 不设宽度 → table-layout:fixed 自动分配剩余空间
+            colgroup.appendChild(col);
+        }
+
+        table.insertBefore(colgroup, table.firstChild);
+    };
+    fixTableColumnWidths();
+
     // ================= 无缝翻页逻辑 =================
     const autoLoadNextPage = async () => {
         if (!STATE.autoLoadNextPage || STATE.isLoadingNextPage || !STATE.nextPageUrl || !threadListContainer) return;
@@ -1555,12 +1597,8 @@
                 threadListContainer.appendChild(tbody);
             });
 
-            // 强制表格重新计算列宽（修复：第一页全部隐藏时 table-layout:fixed 导致列宽塌缩）
-            if (threadListContainer.tagName === 'TABLE') {
-                threadListContainer.style.tableLayout = 'auto';
-                void threadListContainer.offsetHeight;
-                threadListContainer.style.tableLayout = '';
-            }
+            // 重新应用列宽修复（新增行后确保 colgroup 正确）
+            fixTableColumnWidths();
 
             const nextBtn = doc.querySelector('a.nxt');
             STATE.nextPageUrl = nextBtn ? nextBtn.href : null;
@@ -1756,12 +1794,8 @@
             threadListContainer.appendChild(footerTbody);
         }
 
-        // 强制表格重新计算列宽（修复：第一页全部隐藏时 table-layout:fixed 导致 <th class="common"> 列宽塌缩）
-        if (threadListContainer && threadListContainer.tagName === 'TABLE') {
-            threadListContainer.style.tableLayout = 'auto';
-            void threadListContainer.offsetHeight; // 强制回流
-            threadListContainer.style.tableLayout = '';
-        }
+        // 重新应用列宽修复（批量加载后确保 colgroup 正确）
+        fixTableColumnWidths();
 
         if (totalLoaded > 0) {
             // 有可见帖子加载
