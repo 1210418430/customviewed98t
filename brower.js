@@ -1555,6 +1555,13 @@
                 threadListContainer.appendChild(tbody);
             });
 
+            // 强制表格重新计算列宽（修复：第一页全部隐藏时 table-layout:fixed 导致列宽塌缩）
+            if (threadListContainer.tagName === 'TABLE') {
+                threadListContainer.style.tableLayout = 'auto';
+                void threadListContainer.offsetHeight;
+                threadListContainer.style.tableLayout = '';
+            }
+
             const nextBtn = doc.querySelector('a.nxt');
             STATE.nextPageUrl = nextBtn ? nextBtn.href : null;
 
@@ -1747,6 +1754,13 @@
             footerTr.appendChild(footerTd);
             footerTbody.appendChild(footerTr);
             threadListContainer.appendChild(footerTbody);
+        }
+
+        // 强制表格重新计算列宽（修复：第一页全部隐藏时 table-layout:fixed 导致 <th class="common"> 列宽塌缩）
+        if (threadListContainer && threadListContainer.tagName === 'TABLE') {
+            threadListContainer.style.tableLayout = 'auto';
+            void threadListContainer.offsetHeight; // 强制回流
+            threadListContainer.style.tableLayout = '';
         }
 
         if (totalLoaded > 0) {
