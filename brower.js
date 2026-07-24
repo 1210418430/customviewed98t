@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.10
+// @version      15.11
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -2949,20 +2949,53 @@
     const scrollJumpMouseIntervalLabel = document.createElement('span');
     scrollJumpMouseIntervalLabel.innerText = '🖱️ 长按间隔时间';
     scrollJumpMouseIntervalLabel.style.cssText = 'font-size: 12px; font-weight: bold; color: #333;';
+    const scrollJumpMouseIntervalWrap = document.createElement('div');
+    scrollJumpMouseIntervalWrap.style.cssText = 'display:flex; gap:3px; align-items:center;';
     const scrollJumpMouseIntervalSelect = document.createElement('select');
-    scrollJumpMouseIntervalSelect.style.cssText = 'cursor: pointer; font-size: 11px; padding: 2px;';
-    [300, 400, 500, 600, 800, 1000, 1500].forEach(n => {
+    scrollJumpMouseIntervalSelect.style.cssText = 'cursor: pointer; font-size: 11px; padding: 2px; width: 72px;';
+    const intervalPresets = [30, 50, 100, 150, 200, 300, 400, 500, 600, 800, 1000];
+    let _hasCustomInterval = true;
+    intervalPresets.forEach(n => {
         const o = document.createElement('option');
-        o.value = n; o.innerText = (n / 1000).toFixed(1) + ' 秒';
-        if (n === STATE.scrollJumpMouseInterval) o.selected = true;
+        o.value = n; o.innerText = n + 'ms';
+        if (n === STATE.scrollJumpMouseInterval) { o.selected = true; _hasCustomInterval = false; }
         scrollJumpMouseIntervalSelect.appendChild(o);
     });
-    scrollJumpMouseIntervalSelect.onchange = (e) => {
-        STATE.scrollJumpMouseInterval = parseInt(e.target.value);
+    // 如果当前值是自定义的（不在预设中），追加一个 custom option
+    if (_hasCustomInterval && STATE.scrollJumpMouseInterval > 0) {
+        const co = document.createElement('option');
+        co.value = STATE.scrollJumpMouseInterval;
+        co.innerText = STATE.scrollJumpMouseInterval + 'ms';
+        co.selected = true;
+        scrollJumpMouseIntervalSelect.appendChild(co);
+    }
+    const scrollJumpMouseIntervalInput = document.createElement('input');
+    scrollJumpMouseIntervalInput.type = 'number';
+    scrollJumpMouseIntervalInput.min = 10; scrollJumpMouseIntervalInput.max = 5000;
+    scrollJumpMouseIntervalInput.value = STATE.scrollJumpMouseInterval;
+    scrollJumpMouseIntervalInput.style.cssText = 'width:54px; padding:2px 3px; font-size:11px; border:1px solid #ccc; border-radius:3px; text-align:center;';
+    scrollJumpMouseIntervalInput.title = '自定义间隔（ms）';
+    const _applyInterval = (val) => {
+        STATE.scrollJumpMouseInterval = Math.max(10, Math.min(5000, parseInt(val) || 500));
         saveState('custom_scroll_jump_mouse_interval', STATE.scrollJumpMouseInterval);
     };
+    scrollJumpMouseIntervalSelect.onchange = (e) => {
+        const v = parseInt(e.target.value);
+        _applyInterval(v);
+        scrollJumpMouseIntervalInput.value = v;
+    };
+    scrollJumpMouseIntervalInput.addEventListener('input', () => {
+        _applyInterval(scrollJumpMouseIntervalInput.value);
+        // 同步下拉框：如果匹配预设则选中，否则取消选中
+        const iv = STATE.scrollJumpMouseInterval;
+        const matched = [...scrollJumpMouseIntervalSelect.options].find(o => parseInt(o.value) === iv);
+        if (matched) matched.selected = true;
+        else scrollJumpMouseIntervalSelect.selectedIndex = -1;
+    });
+    scrollJumpMouseIntervalWrap.appendChild(scrollJumpMouseIntervalSelect);
+    scrollJumpMouseIntervalWrap.appendChild(scrollJumpMouseIntervalInput);
     scrollJumpMouseIntervalRow.appendChild(scrollJumpMouseIntervalLabel);
-    scrollJumpMouseIntervalRow.appendChild(scrollJumpMouseIntervalSelect);
+    scrollJumpMouseIntervalRow.appendChild(scrollJumpMouseIntervalWrap);
     settingsPanel.appendChild(scrollJumpMouseIntervalRow);
 
     // 滚动小球速度设置
@@ -5372,12 +5405,19 @@
                 };
                 _mouseJumpRaf = requestAnimationFrame(step);
             } else if (hold === 'interval') {
-                // 间隔模式：先跳一次，然后定时跳
-                execScrollJump(dir);
+                // 间隔模式：用即时滚动（非 smooth），避免动画叠加造成顿挫
+                const h = window.innerHeight;
+                let px;
+                switch (STATE.scrollJumpAmount) {
+                    case '1': px = h; break;
+                    case '1/2': px = h / 2; break;
+                    case '2/3': default: px = h * 2 / 3; break;
+                }
+                window.scrollBy(0, px * dir);
                 const interval = STATE.scrollJumpMouseInterval || 500;
                 _mouseJumpTimer = setInterval(() => {
                     if (_mouseJumpDir === 0) { _stopMouseJump(); return; }
-                    execScrollJump(_mouseJumpDir);
+                    window.scrollBy(0, px * _mouseJumpDir);
                 }, interval);
             }
         };
