@@ -5232,8 +5232,8 @@
     };
     const BALL_SIZE = 66;
     const BALL_GAP = 8;
-    const BALL_CSS = (right, bg) =>
-        `position:fixed; bottom:50px; right:${right}px; z-index:100000; width:${BALL_SIZE}px; height:${BALL_SIZE}px; background:${bg}; color:#fff; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; font-size:24px; font-weight:bold; box-shadow:0 4px 16px rgba(0,0,0,0.3); user-select:none;`;
+    const BALL_CSS = (bottom, bg) =>
+        `position:fixed; bottom:${bottom}px; right:50px; z-index:100000; width:${BALL_SIZE}px; height:${BALL_SIZE}px; background:${bg}; color:#fff; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; font-size:24px; font-weight:bold; box-shadow:0 4px 16px rgba(0,0,0,0.3); user-select:none;`;
 
     // 齿轮小球（展开面板）
     const minimizeBall = document.createElement('div');
@@ -5241,7 +5241,7 @@
     minimizeBall.innerText = '⚙';
     minimizeBall.title = '展开面板';
     minimizeBall.onclick = () => {
-        panel.style.display = ''; minimizeBall.style.display = 'none'; unhideMiniBall.style.display = 'none'; login115Ball.style.display = 'none'; recordMiniBall.style.display = 'none';
+        panel.style.display = ''; minimizeBall.style.display = 'none'; unhideMiniBall.style.display = 'none'; login115Ball.style.display = 'none'; recordMiniBall.style.display = 'none'; bookmarkStarBall.style.display = 'none'; bookmarkNormalBall.style.display = 'none'; extractBall.style.display = 'none';
         minimizeBtn.style.display = 'flex';
         STATE.panelMinimized = false;
     };
@@ -5249,7 +5249,7 @@
 
     // 解除隐藏小球（位于展开按钮正上方）
     const unhideMiniBall = document.createElement('div');
-    unhideMiniBall.style.cssText = BALL_CSS(50, '#17a2b8').replace('bottom:50px', 'bottom:' + (50 + BALL_SIZE + BALL_GAP) + 'px');
+    unhideMiniBall.style.cssText = BALL_CSS(50 + BALL_SIZE + BALL_GAP, '#17a2b8');
     unhideMiniBall.innerText = '🔓';
     unhideMiniBall.title = '临时显示当前页隐藏帖子（刷新后恢复）';
     unhideMiniBall.onclick = (e) => {
@@ -5258,10 +5258,9 @@
     };
     document.body.appendChild(unhideMiniBall);
 
-    // 115网盘登录小球
-    const r115 = 50 + BALL_SIZE + BALL_GAP;
+    // 115网盘登录小球（竖排第3位）
     const login115Ball = document.createElement('div');
-    login115Ball.style.cssText = BALL_CSS(r115, '#21b553');
+    login115Ball.style.cssText = BALL_CSS(50 + 2 * (BALL_SIZE + BALL_GAP), '#21b553');
     login115Ball.innerText = '🔗';
     login115Ball.title = '打开115网盘登录';
     login115Ball.onclick = (e) => {
@@ -5270,10 +5269,9 @@
     };
     document.body.appendChild(login115Ball);
 
-    // 记录小球（记录当前页）
-    const r2 = r115 + BALL_SIZE + BALL_GAP;
+    // 记录小球（竖排第4位）
     const recordMiniBall = document.createElement('div');
-    recordMiniBall.style.cssText = BALL_CSS(r2, '#fd7e14');
+    recordMiniBall.style.cssText = BALL_CSS(50 + 3 * (BALL_SIZE + BALL_GAP), '#fd7e14');
     recordMiniBall.innerText = '📝';
     recordMiniBall.title = '记录当前页所有帖子';
     recordMiniBall.onclick = async (e) => {
@@ -5291,6 +5289,65 @@
         }
     };
     document.body.appendChild(recordMiniBall);
+
+    // 收藏为重要帖子小球（竖排第5位，详情页才显示）
+    const bookmarkStarBall = document.createElement('div');
+    bookmarkStarBall.style.cssText = BALL_CSS(50 + 4 * (BALL_SIZE + BALL_GAP), '#dc3545');
+    bookmarkStarBall.innerText = '⭐';
+    bookmarkStarBall.title = '收藏为重要帖子（点击切换）';
+    document.body.appendChild(bookmarkStarBall);
+
+    // 收藏为一般帖子小球（竖排第6位，详情页才显示）
+    const bookmarkNormalBall = document.createElement('div');
+    bookmarkNormalBall.style.cssText = BALL_CSS(50 + 5 * (BALL_SIZE + BALL_GAP), '#007bff');
+    bookmarkNormalBall.innerText = '📌';
+    bookmarkNormalBall.title = '收藏为一般帖子（点击切换）';
+    document.body.appendChild(bookmarkNormalBall);
+
+    // 一键云备份小球（竖排第7位，始终显示）
+    const backupBall = document.createElement('div');
+    backupBall.style.cssText = BALL_CSS(50 + 6 * (BALL_SIZE + BALL_GAP), '#6f42c1');
+    backupBall.innerText = '☁️';
+    backupBall.title = '一键云备份收藏夹和隐藏记录';
+    backupBall.style.display = 'flex';
+    backupBall.onclick = async (e) => {
+        e.stopPropagation();
+        if (!STATE.gistToken) { showToast('请先在设置中配置 GitHub Token', 'error'); return; }
+        try { await gistBookmarksBackup(true); await gistBackup(); showToast('✅ ☁️ 收藏夹 + 隐藏记录已备份', 'success'); }
+        catch (err) { showToast('❌ 备份失败: ' + err.message, 'error'); }
+    };
+    document.body.appendChild(backupBall);
+
+    // 打开设置小球（竖排第8位，始终显示）
+    const settingsBall = document.createElement('div');
+    settingsBall.style.cssText = BALL_CSS(50 + 7 * (BALL_SIZE + BALL_GAP), '#17a2b8');
+    settingsBall.innerText = '⚙';
+    settingsBall.title = '打开论坛小脚本控制台';
+    settingsBall.style.display = 'flex';
+    settingsBall.onclick = (e) => {
+        e.stopPropagation();
+        showDashboard('settings');
+    };
+    document.body.appendChild(settingsBall);
+
+    // 资源提取小球 + 弹窗（竖排第9位，详情页才显示）
+    const extractBall = document.createElement('div');
+    extractBall.style.cssText = BALL_CSS(50 + 8 * (BALL_SIZE + BALL_GAP), '#ffc107');
+    extractBall.innerText = '📦';
+    extractBall.title = '帖子资源提取';
+    const extractPopup = document.createElement('div');
+    extractPopup.style.cssText = 'display:none; position:fixed; z-index:100001; background:#fff; border:1px solid #ccc; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.2); padding:12px; max-width:420px; max-height:500px; overflow-y:auto;';
+    extractBall.onclick = (e) => {
+        e.stopPropagation();
+        if (extractPopup.style.display === 'block') { extractPopup.style.display = 'none'; return; }
+        const br = extractBall.getBoundingClientRect();
+        extractPopup.style.bottom = (window.innerHeight - br.top + 8) + 'px';
+        extractPopup.style.right = (window.innerWidth - br.right + 4) + 'px';
+        extractPopup.style.display = 'block';
+    };
+    document.body.appendChild(extractBall);
+    document.body.appendChild(extractPopup);
+    document.addEventListener('click', (e) => { if (!extractBall.contains(e.target) && !extractPopup.contains(e.target)) extractPopup.style.display = 'none'; });
 
     // ================= 滚动小球 =================
     const SCROLL_BALL = (() => {
@@ -5572,12 +5629,12 @@
     minimizeBtn.style.top = 'auto';
     minimizeBtn.onclick = (e) => {
         e.stopPropagation();
-        panel.style.display = 'none'; minimizeBall.style.display = 'flex'; unhideMiniBall.style.display = 'flex'; login115Ball.style.display = 'flex'; recordMiniBall.style.display = 'flex';
+        panel.style.display = 'none'; minimizeBall.style.display = 'flex'; unhideMiniBall.style.display = 'flex'; login115Ball.style.display = 'flex'; recordMiniBall.style.display = 'flex'; bookmarkStarBall.style.display = 'flex'; bookmarkNormalBall.style.display = 'flex'; extractBall.style.display = 'flex';
         STATE.panelMinimized = true;
         minimizeBtn.style.display = 'none';
     };
     minimizeBall.onclick = () => {
-        panel.style.display = ''; minimizeBall.style.display = 'none'; unhideMiniBall.style.display = 'none'; login115Ball.style.display = 'none'; recordMiniBall.style.display = 'none'; minimizeBtn.style.display = 'flex';
+        panel.style.display = ''; minimizeBall.style.display = 'none'; unhideMiniBall.style.display = 'none'; login115Ball.style.display = 'none'; recordMiniBall.style.display = 'none'; bookmarkStarBall.style.display = 'none'; bookmarkNormalBall.style.display = 'none'; extractBall.style.display = 'none'; minimizeBtn.style.display = 'flex';
         STATE.panelMinimized = false;
     };
     document.body.appendChild(minimizeBtn);
@@ -5643,43 +5700,45 @@
         const toAbs = (raw) => { try { return new URL(raw, location.href).href; } catch(e) { return raw; } };
         const allMergedTexts = [];
 
-        // ---- 收藏按钮（详情页顶部） ----
-        (() => {
-            const _detailTid = (location.href.match(/tid=(\d+)/) || [])[1];
-            if (!_detailTid) return;
-            const _detailTitle = (() => {
-                const t = document.querySelector('#thread_subject') || document.querySelector('h1.ts') || document.querySelector('title');
-                return t ? t.innerText.trim().replace(/\s+/g, ' ').slice(0, 200) : location.href;
-            })();
-            const _bmDetailWrap = document.createElement('div');
-            _bmDetailWrap.style.cssText = 'max-width:980px; margin:0 auto 12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;';
-            const _mkDetailBmBtn = (type, label, bgColor) => {
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.innerText = label;
-                const _curType = getBookmarkType(_detailTid);
-                btn.style.cssText = `padding:5px 14px; font-size:13px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.6'};`;
-                btn.onclick = () => {
-                    if (isBookmarked(_detailTid) && getBookmarkType(_detailTid) === type) {
-                        removeBookmark(_detailTid);
-                        showToast('已取消收藏', 'info');
-                        btn.style.opacity = '0.6';
-                    } else {
-                        addBookmark(_detailTid, _detailTitle, location.href, type);
-                        showToast(`已收藏为${type === 'important' ? '重要⭐' : '一般📌'}`, 'success');
-                        btn.style.opacity = '1';
-                        const other = _bmDetailWrap.querySelector(type === 'important' ? '.custom-bm-detail-normal' : '.custom-bm-detail-important');
-                        if (other) other.style.opacity = '0.6';
-                    }
-                };
-                btn.className = type === 'important' ? 'custom-bm-detail-important' : 'custom-bm-detail-normal';
-                return btn;
-            };
-            _bmDetailWrap.appendChild(_mkDetailBmBtn('important', '⭐ 收藏为重要帖子', '#dc3545'));
-            _bmDetailWrap.appendChild(_mkDetailBmBtn('normal', '📌 收藏为一般帖子', '#007bff'));
-            const _insertTarget = postList.parentNode || document.body;
-            _insertTarget.insertBefore(_bmDetailWrap, postList);
+        // ---- 收藏小球点击逻辑（详情页专用） ----
+        const _detailTid = (location.href.match(/tid=(\d+)/) || [])[1];
+        const _detailTitle = (() => {
+            if (!_detailTid) return '';
+            const t = document.querySelector('#thread_subject') || document.querySelector('h1.ts') || document.querySelector('title');
+            return t ? t.innerText.trim().replace(/\s+/g, ' ').slice(0, 200) : location.href;
         })();
+        if (_detailTid) {
+            // 重要收藏球
+            bookmarkStarBall.style.display = 'flex';
+            bookmarkStarBall.style.opacity = (getBookmarkType(_detailTid) === 'important') ? '1' : '0.6';
+            bookmarkStarBall.onclick = (e) => {
+                e.stopPropagation();
+                if (isBookmarked(_detailTid) && getBookmarkType(_detailTid) === 'important') {
+                    removeBookmark(_detailTid); showToast('已取消收藏', 'info');
+                    bookmarkStarBall.style.opacity = '0.6'; bookmarkNormalBall.style.opacity = '0.6';
+                } else {
+                    addBookmark(_detailTid, _detailTitle, location.href, 'important');
+                    showToast('已收藏为重要⭐', 'success');
+                    bookmarkStarBall.style.opacity = '1'; bookmarkNormalBall.style.opacity = '0.6';
+                }
+            };
+            // 一般收藏球
+            bookmarkNormalBall.style.display = 'flex';
+            bookmarkNormalBall.style.opacity = (getBookmarkType(_detailTid) === 'normal') ? '1' : '0.6';
+            bookmarkNormalBall.onclick = (e) => {
+                e.stopPropagation();
+                if (isBookmarked(_detailTid) && getBookmarkType(_detailTid) === 'normal') {
+                    removeBookmark(_detailTid); showToast('已取消收藏', 'info');
+                    bookmarkStarBall.style.opacity = '0.6'; bookmarkNormalBall.style.opacity = '0.6';
+                } else {
+                    addBookmark(_detailTid, _detailTitle, location.href, 'normal');
+                    showToast('已收藏为一般📌', 'success');
+                    bookmarkNormalBall.style.opacity = '1'; bookmarkStarBall.style.opacity = '0.6';
+                }
+            };
+            // 资源提取球（初始显示）
+            extractBall.style.display = 'flex';
+        }
 
 
         // 详情页推送函数（复用115面板的目录设置）
@@ -5765,6 +5824,9 @@
                     seenUrls.add(href);
                     const ext = href.match(/\.(zip|rar|7z)$/i)?.[1]?.toLowerCase() || 'zip';
                     linkEls.push({ el: a, href, name: text.trim() || '压缩包', type: ext });
+                } else if (/\.torrent/i.test(text)) {
+                    seenUrls.add(href);
+                    linkEls.push({ el: a, href, name: text.trim() || '种子文件', type: 'torrent' });
                 }
             });
 
@@ -5877,6 +5939,18 @@
                     } catch (err) {
                         content = `[解压失败: ${err.message}]`;
                     }
+                } else if (info.type === 'torrent') {
+                    // 种子→磁力转换，显示磁力链接
+                    try {
+                        const result = await torrentToMagnet(info.href);
+                        if (result && result.magnet) {
+                            content = result.magnet;
+                        } else {
+                            content = `[种子转换失败: ${result?.error || '未知错误'}]`;
+                        }
+                    } catch (err) {
+                        content = `[种子转换失败: ${err.message}]`;
+                    }
                 } else {
                     content = `[${info.type.toUpperCase()} 格式需在本地解压，浏览器无法直接处理]`;
                 }
@@ -5895,7 +5969,7 @@
 
                     const inlineHeader = document.createElement('div');
                     inlineHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; flex-wrap:wrap; gap:4px;';
-                    const icon = info.type === 'txt' ? '📄' : '📦';
+                    const icon = info.type === 'txt' ? '📄' : info.type === 'torrent' ? '🧲' : '📦';
                     const inlineTitle = document.createElement('span');
                     inlineTitle.style.cssText = 'font-size:12px; font-weight:bold; color:#495057;';
                     inlineTitle.innerText = `${icon} ${info.name}`;
@@ -5940,13 +6014,44 @@
             }
         }
 
-        // ---- 页面顶部：合并所有内容 ----
-        if (allMergedTexts.length > 0) {
-            const mergedContent = allMergedTexts.map(t =>
-                `━━━━ ${t.name} ━━━━\n${t.content}`
-            ).join('\n\n');
+        // ---- 提取弹窗：合并所有内容 ----
+        // 收集页面上所有 magnet/ed2k 链接和种子链接
+        const pageLinks = { magnets: [], ed2ks: [], torrents: [] };
+        const pageSeen = new Set();
+        postList.querySelectorAll('a[href^="magnet:"], a[href^="ed2k://"], a[href$=".torrent"], a[href*=".torrent?"]').forEach(a => {
+            const href = toAbs(a.href);
+            if (pageSeen.has(href)) return;
+            pageSeen.add(href);
+            if (/^magnet:/i.test(href)) pageLinks.magnets.push(href);
+            else if (/^ed2k:\/\//i.test(href)) pageLinks.ed2ks.push(href);
+            else if (/\.torrent/i.test(href)) pageLinks.torrents.push(href);
+        });
+        // 扫描附件链接中的种子（mod=attachment + 文本含 .torrent）
+        postList.querySelectorAll('a[href*="mod=attachment"]').forEach(a => {
+            const href = toAbs(a.href);
+            if (pageSeen.has(href)) return;
+            const text = a.innerText.trim();
+            if (/\.torrent/i.test(text)) {
+                pageSeen.add(href);
+                pageLinks.torrents.push(href);
+            }
+        });
+        // 扫描文本节点中的 magnet/ed2k
+        const pageWalker = document.createTreeWalker(postList, NodeFilter.SHOW_TEXT, null, false);
+        while (pageWalker.nextNode()) {
+            const node = pageWalker.currentNode;
+            if (node.parentNode.tagName === 'A' || node.parentNode.tagName === 'SCRIPT' || node.parentNode.tagName === 'STYLE') continue;
+            const magnets = node.nodeValue.match(/magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/gi) || [];
+            const ed2ks = node.nodeValue.match(/ed2k:\/\/\|file\|[^|]+\|\d+\|[a-fA-F0-9]{32}\|/gi) || [];
+            magnets.forEach(m => { if (!pageSeen.has(m)) { pageSeen.add(m); pageLinks.magnets.push(m); } });
+            ed2ks.forEach(e => { if (!pageSeen.has(e)) { pageSeen.add(e); pageLinks.ed2ks.push(e); } });
+        }
 
-            // 从所有内容中提取离线链接
+        // 填充提取弹窗
+        const buildExtractPopup = async () => {
+            extractPopup.innerHTML = '<div style="text-align:center;padding:20px;color:#888;">🔄 正在收集资源...</div>';
+
+            // 收集 TXT 内容中的链接
             const allExtractedLinks = [];
             allMergedTexts.forEach(t => {
                 const magnetMatches = t.content.match(/magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/gi) || [];
@@ -5956,83 +6061,166 @@
                 });
             });
 
-            const topWrap = document.createElement('div');
-            topWrap.style.cssText = 'max-width:980px; margin:0 auto 16px; border:2px solid #ffc107; border-radius:6px; padding:12px; background:#fffdf5;';
+            // 合并所有链接
+            const allMagnets = [...new Set([...pageLinks.magnets, ...allExtractedLinks.filter(l => /^magnet:/i.test(l))])];
+            const allEd2ks = [...new Set([...pageLinks.ed2ks, ...allExtractedLinks.filter(l => /^ed2k:\/\//i.test(l))])];
 
-            const topHeader = document.createElement('div');
-            topHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; flex-wrap:wrap; gap:8px;';
-            const topTitle = document.createElement('span');
-            topTitle.style.cssText = 'font-size:14px; font-weight:bold; color:#495057;';
-            topTitle.innerText = `📄 本帖 TXT/ZIP 内容汇总 (${allMergedTexts.length} 个文件${allExtractedLinks.length > 0 ? '，' + allExtractedLinks.length + ' 条离线链接' : ''})`;
-            topHeader.appendChild(topTitle);
-
-            const topBtnRow = document.createElement('div');
-            topBtnRow.style.cssText = 'display:flex; gap:6px;';
-
-            const topCopyBtn = document.createElement('button');
-            topCopyBtn.type = 'button'; topCopyBtn.innerText = '复制全部';
-            topCopyBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 12px; background:#6c757d; color:#fff; border:none; border-radius:3px; font-weight:bold;';
-            topCopyBtn.onclick = () => { navigator.clipboard.writeText(mergedContent).then(() => { topCopyBtn.innerText = '已复制'; setTimeout(() => topCopyBtn.innerText = '复制全部', 2000); }); };
-            topBtnRow.appendChild(topCopyBtn);
-
-            if (allExtractedLinks.length > 0) {
-                const topPushAllBtn = document.createElement('button');
-                topPushAllBtn.type = 'button'; topPushAllBtn.innerText = `☁️ 一键推送全部 (${allExtractedLinks.length})`;
-                topPushAllBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 24px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
-                topPushAllBtn.onclick = () => { detailPushTo115(allExtractedLinks, topPushAllBtn); };
-                topBtnRow.appendChild(topPushAllBtn);
+            // 种子转磁力
+            const torrentMagnets = [];
+            for (const tUrl of pageLinks.torrents) {
+                try {
+                    const result = await torrentToMagnet(tUrl);
+                    if (result && result.magnet) torrentMagnets.push(result.magnet);
+                } catch (e) { /* skip failed torrents */ }
             }
+            const allLinks = [...allMagnets, ...allEd2ks, ...torrentMagnets];
 
-            topHeader.appendChild(topBtnRow);
-            topWrap.appendChild(topHeader);
+            // 构建弹窗内容
+            extractPopup.innerHTML = '';
+            const popupTitle = document.createElement('div');
+            popupTitle.style.cssText = 'font-size:13px; font-weight:bold; color:#495057; margin-bottom:6px;';
+            const parts = [];
+            if (allMergedTexts.length > 0) parts.push(`${allMergedTexts.length} 个文件`);
+            if (allMagnets.length > 0) parts.push(`${allMagnets.length} 磁力`);
+            if (allEd2ks.length > 0) parts.push(`${allEd2ks.length} ed2k`);
+            if (torrentMagnets.length > 0) parts.push(`${torrentMagnets.length} 种子→磁力`);
+            popupTitle.innerText = '📦 ' + (parts.length > 0 ? parts.join(' / ') : '无资源');
+            extractPopup.appendChild(popupTitle);
 
-            // 逐行链接 + 推送按钮
-            if (allExtractedLinks.length > 0) {
-                const linkListDiv = document.createElement('div');
-                linkListDiv.style.cssText = 'max-height:200px; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:4px; margin-bottom:8px;';
-                allExtractedLinks.forEach(link => {
-                    const lineDiv = document.createElement('div');
-                    lineDiv.style.cssText = 'display:flex; align-items:center; gap:4px; padding:2px 0; border-bottom:1px solid #eee;';
+            if (allLinks.length > 0) {
+                const btnRow = document.createElement('div');
+                btnRow.style.cssText = 'display:flex; gap:4px; margin-bottom:6px;';
+                const copyAllBtn = document.createElement('button');
+                copyAllBtn.type = 'button'; copyAllBtn.innerText = '复制全部';
+                copyAllBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:3px 10px; background:#6c757d; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                copyAllBtn.onclick = () => { navigator.clipboard.writeText(allLinks.join('\n')).then(() => { copyAllBtn.innerText = '已复制'; setTimeout(() => copyAllBtn.innerText = '复制全部', 2000); }); };
+                btnRow.appendChild(copyAllBtn);
+                const pushAllBtn = document.createElement('button');
+                pushAllBtn.type = 'button'; pushAllBtn.innerText = `☁️ 推送全部(${allLinks.length})`;
+                pushAllBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:3px 14px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                pushAllBtn.onclick = () => { detailPushTo115(allLinks, pushAllBtn); };
+                btnRow.appendChild(pushAllBtn);
+                extractPopup.appendChild(btnRow);
+
+                // 链接列表
+                const linkList = document.createElement('div');
+                linkList.style.cssText = 'max-height:250px; overflow-y:auto; background:#f8f9fa; padding:6px; border-radius:4px; margin-bottom:6px;';
+                allLinks.forEach(link => {
+                    const line = document.createElement('div');
+                    line.style.cssText = 'display:flex; align-items:center; gap:3px; padding:1px 0; border-bottom:1px solid #eee; font-size:10px;';
+                    const tag = link.startsWith('magnet:') ? '🧲' : '📎';
                     const linkText = document.createElement('span');
-                    linkText.style.cssText = 'flex:1; font-size:11px; word-break:break-all; font-family:monospace;';
-                    linkText.innerText = link;
-                    lineDiv.appendChild(linkText);
-
-                    const lineCopyBtn = document.createElement('button');
-                    lineCopyBtn.type = 'button'; lineCopyBtn.innerText = '复制';
-                    lineCopyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 8px; background:#6c757d; color:#fff; border:none; border-radius:3px; flex-shrink:0; font-weight:bold;';
-                    lineCopyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(link).then(() => { lineCopyBtn.innerText = '已复制'; setTimeout(() => lineCopyBtn.innerText = '复制', 1500); }); };
-                    lineDiv.appendChild(lineCopyBtn);
-
-                    const linePushBtn = document.createElement('button');
-                    linePushBtn.type = 'button'; linePushBtn.innerText = '☁️';
-                     linePushBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:2px 16px; background:#fd7e14; color:#fff; border:none; border-radius:3px; flex-shrink:0; font-weight:bold;';
-                    linePushBtn.title = '推送到115';
-                    linePushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); detailPushTo115([link], linePushBtn); };
-                    lineDiv.appendChild(linePushBtn);
-
-                    linkListDiv.appendChild(lineDiv);
+                    linkText.style.cssText = 'flex:1; word-break:break-all; font-family:monospace; font-size:10px;';
+                    linkText.innerText = tag + ' ' + (link.length > 80 ? link.substring(0, 80) + '...' : link);
+                    linkText.title = link;
+                    line.appendChild(linkText);
+                    const copyBtn = document.createElement('button');
+                    copyBtn.type = 'button'; copyBtn.innerText = '📋';
+                    copyBtn.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 4px; background:#6c757d; color:#fff; border:none; border-radius:2px; flex-shrink:0;';
+                    copyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(link).then(() => { copyBtn.innerText = '✓'; setTimeout(() => copyBtn.innerText = '📋', 1500); }); };
+                    line.appendChild(copyBtn);
+                    const pushBtn = document.createElement('button');
+                    pushBtn.type = 'button'; pushBtn.innerText = '☁️';
+                    pushBtn.style.cssText = 'font-size:10px; cursor:pointer; padding:1px 6px; background:#fd7e14; color:#fff; border:none; border-radius:2px; flex-shrink:0;';
+                    pushBtn.title = '推送到115';
+                    pushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); detailPushTo115([link], pushBtn); };
+                    line.appendChild(pushBtn);
+                    linkList.appendChild(line);
                 });
-                topWrap.appendChild(linkListDiv);
+                extractPopup.appendChild(linkList);
+            } else if (allMergedTexts.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'color:#888; font-size:12px; text-align:center; padding:10px;';
+                empty.innerText = '本页未发现资源链接';
+                extractPopup.appendChild(empty);
             }
 
-            const topPre = document.createElement('pre');
-            topPre.textContent = mergedContent;
-            topPre.style.cssText = 'max-height:300px; overflow-y:auto; background:#f8f9fa; padding:10px; border-radius:4px; font-size:12px; white-space:pre-wrap; word-break:break-all; margin:0;';
-            topWrap.appendChild(topPre);
+            // TXT/ZIP 内容
+            if (allMergedTexts.length > 0) {
+                const mergedContent = allMergedTexts.map(t => `━━━━ ${t.name} ━━━━\n${t.content}`).join('\n\n');
+                const txtPre = document.createElement('pre');
+                txtPre.textContent = mergedContent;
+                txtPre.style.cssText = 'max-height:200px; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:4px; font-size:11px; white-space:pre-wrap; word-break:break-all; margin:0;';
+                extractPopup.appendChild(txtPre);
+                if (mergedContent.length > 500) {
+                    const toggle = document.createElement('button');
+                    toggle.type = 'button'; toggle.innerText = '展开全文';
+                    toggle.style.cssText = 'font-size:11px; margin-top:4px; cursor:pointer; padding:2px 8px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
+                    toggle.onclick = () => { if (txtPre.style.maxHeight === '200px') { txtPre.style.maxHeight = 'none'; toggle.innerText = '收起'; } else { txtPre.style.maxHeight = '200px'; toggle.innerText = '展开全文'; } };
+                    extractPopup.appendChild(toggle);
+                }
+            }
 
-            if (mergedContent.length > 800) {
-                const topToggle = document.createElement('button');
-                topToggle.type = 'button'; topToggle.innerText = '展开全文';
-                topToggle.style.cssText = 'font-size:12px; margin-top:6px; cursor:pointer; padding:4px 12px; background:#e9ecef; border:1px solid #ccc; border-radius:3px;';
-                topToggle.onclick = () => { if (topPre.style.maxHeight === '300px') { topPre.style.maxHeight = 'none'; topToggle.innerText = '收起'; } else { topPre.style.maxHeight = '300px'; topToggle.innerText = '展开全文'; } };
-                topWrap.appendChild(topToggle);
+            // ---- 页面顶部综合提取展示卡 ----
+            const cardWrap = document.createElement('div');
+            cardWrap.style.cssText = 'max-width:980px; margin:0 auto 12px; border:2px solid #ffc107; border-radius:6px; padding:10px; background:#fffdf5;';
+            const cardHeader = document.createElement('div');
+            cardHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; flex-wrap:wrap; gap:6px;';
+            const cardTitle = document.createElement('span');
+            cardTitle.style.cssText = 'font-size:13px; font-weight:bold; color:#495057;';
+            const cardParts = [];
+            if (allMagnets.length > 0) cardParts.push(`${allMagnets.length} 磁力`);
+            if (allEd2ks.length > 0) cardParts.push(`${allEd2ks.length} ed2k`);
+            if (torrentMagnets.length > 0) cardParts.push(`${torrentMagnets.length} 种子→磁力`);
+            if (allMergedTexts.length > 0) cardParts.push(`${allMergedTexts.length} 个TXT/ZIP`);
+            cardTitle.innerText = '📦 综合提取展示卡' + (cardParts.length > 0 ? ' (' + cardParts.join(' / ') + ')' : '');
+            cardHeader.appendChild(cardTitle);
+
+            if (allLinks.length > 0) {
+                const cardBtnRow = document.createElement('div');
+                cardBtnRow.style.cssText = 'display:flex; gap:4px;';
+                const cardCopyBtn = document.createElement('button');
+                cardCopyBtn.type = 'button'; cardCopyBtn.innerText = '复制全部';
+                cardCopyBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:3px 10px; background:#6c757d; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                cardCopyBtn.onclick = () => { navigator.clipboard.writeText(allLinks.join('\n')).then(() => { cardCopyBtn.innerText = '已复制'; setTimeout(() => cardCopyBtn.innerText = '复制全部', 2000); }); };
+                cardBtnRow.appendChild(cardCopyBtn);
+                const cardPushBtn = document.createElement('button');
+                cardPushBtn.type = 'button'; cardPushBtn.innerText = `☁️ 推送全部(${allLinks.length})`;
+                cardPushBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:3px 14px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                cardPushBtn.onclick = () => { detailPushTo115(allLinks, cardPushBtn); };
+                cardBtnRow.appendChild(cardPushBtn);
+                cardHeader.appendChild(cardBtnRow);
+            }
+            cardWrap.appendChild(cardHeader);
+
+            if (allLinks.length > 0) {
+                const cardLinkList = document.createElement('div');
+                cardLinkList.style.cssText = 'max-height:180px; overflow-y:auto; background:#f8f9fa; padding:6px; border-radius:4px; margin-bottom:6px;';
+                allLinks.forEach(link => {
+                    const line = document.createElement('div');
+                    line.style.cssText = 'display:flex; align-items:center; gap:3px; padding:1px 0; border-bottom:1px solid #eee; font-size:11px;';
+                    const tag = link.startsWith('magnet:') ? '🧲' : '📎';
+                    const linkText = document.createElement('span');
+                    linkText.style.cssText = 'flex:1; word-break:break-all; font-family:monospace;';
+                    linkText.innerText = tag + ' ' + (link.length > 90 ? link.substring(0, 90) + '...' : link);
+                    linkText.title = link;
+                    line.appendChild(linkText);
+                    const copyBtn = document.createElement('button');
+                    copyBtn.type = 'button'; copyBtn.innerText = '复制';
+                    copyBtn.style.cssText = 'font-size:10px; cursor:pointer; padding:2px 6px; background:#6c757d; color:#fff; border:none; border-radius:2px; flex-shrink:0;';
+                    copyBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); navigator.clipboard.writeText(link).then(() => { copyBtn.innerText = '已复制'; setTimeout(() => copyBtn.innerText = '复制', 1500); }); };
+                    line.appendChild(copyBtn);
+                    const pushBtn = document.createElement('button');
+                    pushBtn.type = 'button'; pushBtn.innerText = '☁️';
+                    pushBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:2px 10px; background:#fd7e14; color:#fff; border:none; border-radius:2px; flex-shrink:0; font-weight:bold;';
+                    pushBtn.title = '推送到115';
+                    pushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); detailPushTo115([link], pushBtn); };
+                    line.appendChild(pushBtn);
+                    cardLinkList.appendChild(line);
+                });
+                cardWrap.appendChild(cardLinkList);
+            } else if (allMergedTexts.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'color:#888; font-size:12px; text-align:center; padding:8px;';
+                empty.innerText = '本页未发现资源链接';
+                cardWrap.appendChild(empty);
             }
 
             // 插入到页面顶部
             const insertTarget = postList.parentNode || document.body;
-            insertTarget.insertBefore(topWrap, postList);
-        }
+            insertTarget.insertBefore(cardWrap, postList);
+        };
+        if (_detailTid) { buildExtractPopup(); }
     };
 
     // ================= 详情页：强制加载所有懒加载图片 =================
@@ -6083,5 +6271,77 @@
 
         initDetailPage();
     }
+
+    // ================= 全局文字选中搜索弹窗 =================
+    (() => {
+        const popup = document.createElement('div');
+        popup.style.cssText = 'display:none; position:fixed; z-index:200000; background:#fff; border:1px solid #ccc; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.25); padding:8px;';
+        document.body.appendChild(popup);
+
+        const forumSearch = (text) => {
+            const form = document.getElementById('scbar_form');
+            const input = document.getElementById('scbar_txt');
+            if (form && input) {
+                input.value = text;
+                form.submit();
+            } else {
+                window.open('/search.php?mod=forum&searchsubmit=yes&srchtxt=' + encodeURIComponent(text), '_blank');
+            }
+        };
+
+        const search115 = (text) => {
+            const url = 'https://115.com/?url=' + encodeURIComponent('/?aid=1&cid=0&old_cid=0&old_cid_name=%E6%A0%B9%E7%9B%AE%E5%BD%95&search_value=' + encodeURIComponent(text) + '&ct=file&ac=search&is_wl_tpl=1') + '&submode=wangpan&mode=search';
+            GM_openInTab(url, { active: true });
+        };
+
+        const mkBtn = (label, bg, onClick) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.innerText = label;
+            btn.style.cssText = `display:block; width:100%; padding:6px 12px; margin:2px 0; font-size:12px; cursor:pointer; background:${bg}; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:nowrap;`;
+            btn.onclick = (e) => { e.stopPropagation(); onClick(); popup.style.display = 'none'; };
+            return btn;
+        };
+
+        document.addEventListener('mouseup', (e) => {
+            setTimeout(() => {
+                const sel = window.getSelection();
+                const text = (sel && sel.toString() || '').trim();
+                if (!text || text.length < 2 || text.length > 200) {
+                    popup.style.display = 'none';
+                    return;
+                }
+                // 检查是否在输入框内
+                const activeEl = document.activeElement;
+                if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable)) {
+                    popup.style.display = 'none';
+                    return;
+                }
+                // 不拦截右键
+                if (e.button === 2) return;
+
+                popup.innerHTML = '';
+                popup.appendChild(mkBtn('🔍 论坛搜索: ' + text.substring(0, 30), '#007bff', () => forumSearch(text)));
+                popup.appendChild(mkBtn('🔗 115搜索: ' + text.substring(0, 30), '#21b553', () => search115(text)));
+                popup.appendChild(mkBtn('🔍+🔗 论坛+115同时搜索', '#6f42c1', () => { forumSearch(text); setTimeout(() => search115(text), 500); }));
+
+                // 定位弹窗在选中文字附近
+                const range = sel.getRangeAt(0);
+                const rect = range.getBoundingClientRect();
+                let top = rect.bottom + 8;
+                let left = rect.left;
+                if (top + 150 > window.innerHeight) top = rect.top - 160;
+                if (left + 200 > window.innerWidth) left = window.innerWidth - 210;
+                if (left < 5) left = 5;
+                popup.style.top = top + 'px';
+                popup.style.left = left + 'px';
+                popup.style.display = 'block';
+            }, 10);
+        });
+
+        document.addEventListener('mousedown', (e) => {
+            if (!popup.contains(e.target)) popup.style.display = 'none';
+        });
+    })();
 
 })();
