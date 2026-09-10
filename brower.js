@@ -13,6 +13,7 @@
 // @match        *://sehuatang.org/*
 // @match        *://127.0.0.1:20000/*
 // @match        *://*.127.0.0.1:20000/*
+// @match        *://127.0.0.1:14000/*
 // @match        *://192.168.0.88:14000/*
 // @match        *://*.sehuatang.org/*
 // @grant        GM_openInTab
@@ -3521,9 +3522,12 @@
             const everyLink = [...allLinks, ...txtLinks];
 
             // 一键推送函数（日志同步到115面板）
-            const pushLinksTo115 = async (links, btn) => {
+            // folderNameOverride: 传入则使用该文件夹名（离线保存目录仍用面板原设置），否则用面板新建文件夹输入框
+            const pushLinksTo115 = async (links, btn, folderNameOverride) => {
                 const cid = document.getElementById('offline115-cid').value.trim() || '0';
-                const newFolder = document.getElementById('offline115-newfolder').value.trim();
+                const newFolder = folderNameOverride !== undefined
+                    ? folderNameOverride
+                    : document.getElementById('offline115-newfolder').value.trim();
                 const logEl = document.getElementById('offline115-log');
                 btn.disabled = true;
                 const origText = btn.innerText;
@@ -3608,6 +3612,22 @@
                 pushAllBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 24px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 pushAllBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); pushLinksTo115(everyLink, pushAllBtn); };
                 linkBtnRow.appendChild(pushAllBtn);
+
+                // 按帖子标题新建文件夹并推送全部链接
+                const pushFolderBtn = document.createElement('button');
+                pushFolderBtn.type = 'button'; pushFolderBtn.innerText = '📁 按标题建文件夹推送';
+                pushFolderBtn.title = '按帖子标题新建文件夹，并将全部链接推送到该文件夹';
+                pushFolderBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 24px; background:#0d6efd; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                pushFolderBtn.onclick = (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    const titleLink = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                    let folderName = titleLink ? titleLink.innerText.trim() : '';
+                    // 过滤文件名非法字符并限制长度
+                    folderName = folderName.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 100);
+                    if (!folderName) { showToast('未找到帖子标题，无法新建文件夹', 'error'); return; }
+                    pushLinksTo115(everyLink, pushFolderBtn, folderName);
+                };
+                linkBtnRow.appendChild(pushFolderBtn);
 
                 linkHeader.appendChild(linkBtnRow);
                 linkWrap.appendChild(linkHeader);
@@ -4126,9 +4146,11 @@
         pushBtn.disabled = false;
         pushBtn.innerText = '☁️ 推送到115';
 
-        // 推送完成后清空链接（保留新建文件夹名）
+        // 推送完成后清空链接（不保留新建文件夹名）
         urlsTextarea.value = '';
         saveState('offline_115_urls', '');
+        newFolderInput.value = '';
+        saveState('offline_115_new_folder', '');
         updateQuotaDisplay();
 
         // 压缩包自动解压
