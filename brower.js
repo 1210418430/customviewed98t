@@ -5764,9 +5764,12 @@
 
 
         // 详情页推送函数（复用115面板的目录设置）
-        const detailPushTo115 = async (links, btn) => {
+        // folderNameOverride: 传入则使用该文件夹名（离线保存目录仍用面板原设置），否则用面板新建文件夹输入框
+        const detailPushTo115 = async (links, btn, folderNameOverride) => {
             const cid = document.getElementById('offline115-cid')?.value?.trim() || '0';
-            const newFolder = document.getElementById('offline115-newfolder')?.value?.trim() || '';
+            const newFolder = folderNameOverride !== undefined
+                ? folderNameOverride
+                : (document.getElementById('offline115-newfolder')?.value?.trim() || '');
             const logEl = document.getElementById('offline115-log');
             btn.disabled = true;
             const origText = btn.innerText;
@@ -6201,6 +6204,20 @@
                 cardPushBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:3px 14px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 cardPushBtn.onclick = () => { detailPushTo115(allLinks, cardPushBtn); };
                 cardBtnRow.appendChild(cardPushBtn);
+
+                // 按帖子标题新建文件夹并推送全部链接
+                const cardFolderBtn = document.createElement('button');
+                cardFolderBtn.type = 'button'; cardFolderBtn.innerText = '📁 按标题建文件夹推送';
+                cardFolderBtn.title = '按帖子标题新建文件夹，并将全部链接推送到该文件夹';
+                cardFolderBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:3px 14px; background:#0d6efd; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                cardFolderBtn.onclick = (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    let folderName = (_detailTitle || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 100);
+                    if (!folderName) { showToast('未找到帖子标题，无法新建文件夹', 'error'); return; }
+                    detailPushTo115(allLinks, cardFolderBtn, folderName);
+                };
+                cardBtnRow.appendChild(cardFolderBtn);
+
                 cardHeader.appendChild(cardBtnRow);
             }
             cardWrap.appendChild(cardHeader);
