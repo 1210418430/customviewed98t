@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.12
+// @version      15.13
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -854,77 +854,126 @@
         return m ? m[1].toUpperCase() : '';
     };
 
-    // 兜底：在目标目录里按名字等结果条目，拿到 fid
-    const offline115WaitDirItemFid = async (cid, name, timeoutMs = 12000) => {
-        const target = String(name || '');
-        if (!target) return null;
-        const strip = (s) => String(s || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').toLowerCase();
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            try {
-                const resp = await api115.get(`https://webapi.115.com/files?aid=1&cid=${cid || '0'}&o=user_ptime&asc=0&offset=0&show_dir=1&limit=30&format=json`);
-                if (resp && resp.state && resp.data) {
-                    const hit = resp.data.find(f => {
-                        const n = f.n || f.name || '';
-                        if (!n) return false;
-                        return n === target || strip(n) === strip(target);
-                    });
-                    if (hit && hit.fid) return String(hit.fid);
-                }
-            } catch (e) { /* 忽略，继续轮询 */ }
-            await new Promise(r => setTimeout(r, 3000));
+    // 列出目录下的全部条目（含分页）
+    const offline115ListDirItems = async (cid) => {
+        const out = [];
+        let offset = 0;
+        const limit = 1150;
+        while (true) {
+            const resp = await api115.get(`https://webapi.115.com/files?aid=1&cid=${cid || '0'}&o=user_ptime&asc=0&offset=${offset}&show_dir=1&limit=${limit}&format=json`);
+            if (!resp || !resp.state || !Array.isArray(resp.data) || resp.data.length === 0) break;
+            out.push(...resp.data);
+            offset += resp.data.length;
+            if (resp.data.length < limit) break;
         }
-        return null;
+        return out;
     };
 
-    // 推送完成后按目标名改名：先从离线任务列表定位 fid，兜底扫目录，最后批量改名
-    const offline115RenamePushed = async (cid, entries, logFn) => {
+    // 推送前给目标目录拍快照（fid 集合）。拿不到快照必须放弃改名——宁可不动，也不能改错
+    const offline115SnapshotDir = async (cid, logFn) => {
+        try {
+            const items = await offline115ListDirItems(cid);
+            return new Set(items.map(f => String(f.fid || f.cid || '')).filter(Boolean));
+        } catch (e) {
+            if (logFn) logFn(`  ⚠️ 读取目标目录失败，本次不改名（避免误改）: ${e.message}`);
+            return null;
+        }
+    };
+
+    // 比对用名字键：去扩展名、去空白、转小写
+    const offline115NameKey = (s) => String(s || '')
+        .replace(/\.[A-Za-z0-9]{1,8}$/, '')
+        .replace(/\s+/g, '')
+        .toLowerCase();
+
+    // 推送完成后按目标名改名
+    // 定位原则：只改「推送后新出现在目标目录中的条目」。
+    // 绝不能用离线任务的 file_id —— 115 里它是该任务所属下载目录的 cid（就是保存目录本身），
+    // 用它改名会把上一层文件夹改掉。
+    const offline115RenamePushed = async (cid, entries, logFn, beforeFids) => {
         const log = logFn || (() => {});
         const list = (entries || []).filter(e => e && e.link && e.newName);
         if (list.length === 0) return { ok: 0, fail: 0 };
+        if (!(beforeFids instanceof Set)) {
+            log(`  ⚠️ 缺少推送前目录快照，已跳过改名`);
+            return { ok: 0, fail: list.length };
+        }
 
         log(`✏️ 按标题改名（${list.length} 项）...`);
         const resolved = new Map(); // link -> {fid, newName}
-        const deadline = Date.now() + 45000;
+        const usedFids = new Set();
+        const deadline = Date.now() + 60000;
+        let emptyRounds = 0; // 连续多轮没有新条目就早退，别让用户干等
 
         while (Date.now() < deadline && resolved.size < list.length) {
-            let tasks = [];
+            let newItems = [];
+            try {
+                const items = await offline115ListDirItems(cid);
+                newItems = items.filter(f => {
+                    const fid = String(f.fid || f.cid || '');
+                    return fid && !beforeFids.has(fid);
+                });
+            } catch (e) { /* 忽略，下一轮再试 */ }
+
+            // 任务名：磁力的真实名称，用来匹配目录里那一项
+            const taskNameByHash = new Map();
             try {
                 const resp = await api115.get('https://115.com/web/lixian/?ct=lixian&ac=task_lists&page=1');
-                tasks = (resp && resp.tasks) || [];
-            } catch (e) { /* 忽略，继续轮询 */ }
+                ((resp && resp.tasks) || []).forEach(t => {
+                    if (t && t.info_hash && t.name) taskNameByHash.set(String(t.info_hash).toUpperCase(), String(t.name));
+                });
+            } catch (e) { /* 忽略 */ }
+
             for (const e of list) {
                 if (resolved.has(e.link)) continue;
                 const hash = String(e.hash || offline115GetInfoHash(e.link) || '').toUpperCase();
-                const task = tasks.find(t => {
-                    if (hash && t.info_hash && String(t.info_hash).toUpperCase() === hash) return true;
-                    if (t.url && t.url === e.link) return true;
-                    return false;
+                const keys = [offline115NameKey(e.origName), offline115NameKey(taskNameByHash.get(hash))]
+                    .filter(Boolean);
+                if (keys.length === 0) continue;
+                const hit = newItems.find(f => {
+                    const fid = String(f.fid || f.cid || '');
+                    if (!fid || usedFids.has(fid)) return false;
+                    const k = offline115NameKey(f.n || f.name || '');
+                    return k && keys.includes(k);
                 });
-                if (!task) continue;
-                // BT 任务的 file_id 即该项（目录或文件）的 id；HTTP 直链任务可能为 0，交给目录扫描兜底
-                const fid = task.file_id || task.fid || task.target_fid;
-                if (fid && String(fid) !== '0') resolved.set(e.link, { fid: String(fid), newName: e.newName });
+                if (hit) {
+                    const fid = String(hit.fid || hit.cid);
+                    usedFids.add(fid);
+                    resolved.set(e.link, { fid, newName: e.newName });
+                }
             }
-            if (resolved.size >= list.length) break;
-            await new Promise(r => setTimeout(r, 3000));
-        }
 
-        for (const e of list) {
-            if (resolved.has(e.link)) continue;
-            const fid = e.origName ? await offline115WaitDirItemFid(cid, e.origName, 12000) : null;
-            if (fid) resolved.set(e.link, { fid, newName: e.newName });
+            // 只剩「1 条待改名 + 1 个新增条目」时，名字对不上也可确定是它，兜底认领
+            const freeNew = newItems.filter(f => {
+                const fid = String(f.fid || f.cid || '');
+                return fid && !usedFids.has(fid);
+            });
+            const unresolved = list.filter(e => !resolved.has(e.link));
+            if (unresolved.length === 1 && freeNew.length === 1) {
+                const fid = String(freeNew[0].fid || freeNew[0].cid);
+                usedFids.add(fid);
+                resolved.set(unresolved[0].link, { fid, newName: unresolved[0].newName });
+            }
+
+            if (resolved.size >= list.length) break;
+            if (newItems.length === 0) {
+                emptyRounds++;
+                if (emptyRounds >= 7) break; // 约 21 秒仍无新增，判定不会出现
+            } else {
+                emptyRounds = 0;
+            }
+            await new Promise(r => setTimeout(r, 3000));
         }
 
         const items = [];
         const seenFid = new Set();
         for (const b of resolved.values()) {
-            if (seenFid.has(b.fid)) continue; // 同一任务被多条链接命中时只改一次
+            if (seenFid.has(b.fid)) continue; // 同一项被多条链接命中时只改一次
             seenFid.add(b.fid);
             items.push(b);
         }
         if (items.length === 0) {
-            log(`  ⚠️ 未定位到刚推送的条目（可能仍在解析），已跳过改名`);
+            log(`  ⚠️ 目标目录里没有出现新条目，已跳过改名（可能命中已有文件或仍在解析）`);
             return { ok: 0, fail: list.length };
         }
 
@@ -954,7 +1003,10 @@
                 }
             }
         }
-        if (list.length > items.length) fail += list.length - items.length;
+        if (list.length > items.length) {
+            fail += list.length - items.length;
+            log(`  ⚠️ ${list.length - items.length} 项未能在目标目录中定位，已跳过（可稍后在 115 手动改名）`);
+        }
         log(`✏️ 改名完成：${ok} 成功，${fail} 失败`);
         return { ok, fail };
     };
@@ -995,6 +1047,9 @@
             } catch (e) { log(`⚠️ 文件夹处理失败: ${e.message}`); }
         }
 
+        // 改名用：推送前先记录目标目录已有的 fid，之后只认新增条目
+        const beforeFids = title ? await offline115SnapshotDir(targetCid, log) : null;
+
         let ok = 0, fail = 0;
         const pushed = [];
         for (let i = 0; i < links.length; i++) {
@@ -1033,7 +1088,7 @@
             if (entries.length === 0) {
                 log(`  ⚠️ 标题套用规则后为空，未改名`);
             } else {
-                await offline115RenamePushed(targetCid, entries, log);
+                await offline115RenamePushed(targetCid, entries, log, beforeFids);
             }
             if (btn) { btn.innerText = origText; btn.disabled = false; }
         }
