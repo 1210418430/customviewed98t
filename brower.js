@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.11
+// @version      15.12
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -768,15 +768,316 @@
         return await api115.post('https://webapi.115.com/rb/delete', { fid: fidMap });
     };
 
-    // 批量重命名（PHP 数组格式：file_list[0][fid]=...）
+    // 批量重命名（115 实际参数格式：files_new_name[<fid>]=<新文件名>）
     const offline115BatchRename = async (fileList) => {
         const params = new URLSearchParams();
-        fileList.forEach((f, i) => {
-            params.append(`file_list[${i}][fid]`, f.fid);
-            params.append(`file_list[${i}][file_name]`, f.file_name);
+        fileList.forEach(f => {
+            params.append(`files_new_name[${f.fid}]`, f.file_name);
         });
-        const body = params.toString();
-        return await api115.postRaw('https://webapi.115.com/files/batch_rename', body);
+        return await api115.postRaw('https://webapi.115.com/files/batch_rename', params.toString());
+    };
+
+    // ================= 按帖子标题重命名（推送即改名） =================
+    // 套用设置中的重命名规则：全部规则按顺序执行，替换留空＝删除该文字
+    const offline115ApplyRenameRules = (name) => {
+        let rules = STATE.offline115RenameRules;
+        if (!Array.isArray(rules)) { STATE.offline115RenameRules = []; rules = []; }
+        let out = name || '';
+        for (const r of rules) {
+            const findStr = r && r.find ? r.find : '';
+            if (!findStr) continue;
+            const replaceStr = r.replace == null ? '' : String(r.replace);
+            const escaped = findStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            out = out.replace(new RegExp(escaped, 'g'), replaceStr);
+        }
+        return out;
+    };
+
+    // 115 文件名清洗：非法字符、换行、连续空格、首尾空白与点
+    const offline115SanitizeName = (name) => {
+        let n = String(name || '')
+            .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim();
+        n = n.replace(/_{2,}/g, '_');
+        n = n.replace(/^[.\s]+/, '').replace(/[.\s_]+$/, '');
+        return n;
+    };
+
+    // 按字节安全截断（115 名称上限 255 字节，留余量）
+    const offline115TruncateByBytes = (str, maxBytes = 200) => {
+        let out = '', bytes = 0;
+        for (const ch of String(str || '')) {
+            const b = typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(ch).length : ch.length;
+            if (bytes + b > maxBytes) break;
+            out += ch; bytes += b;
+        }
+        return out.trim();
+    };
+
+    // 从链接推测 115 侧原始名字（磁力 dn= / ed2k 文件名 / URL 末段）
+    const offline115GuessOrigName = (link) => {
+        try {
+            if (/^magnet:/i.test(link)) {
+                const m = link.match(/[?&]dn=([^&]+)/i);
+                return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : '';
+            }
+            if (/^ed2k:\/\//i.test(link)) {
+                const parts = link.split('|');
+                return parts[2] ? decodeURIComponent(parts[2]) : '';
+            }
+            const p = new URL(link).pathname;
+            let n = p.split('/').pop() || '';
+            try { n = decodeURIComponent(n); } catch (e) { /* 保留原样 */ }
+            return n;
+        } catch (e) { return ''; }
+    };
+
+    // 生成目标名：标题 → 套规则 → 清洗 → 多链接拼接 → 限长
+    const offline115BuildTitleName = (title, origName, index, total) => {
+        let base = offline115SanitizeName(offline115ApplyRenameRules(title || ''));
+        if (!base) return '';
+        const orig = offline115SanitizeName(origName || '');
+        if (total > 1) {
+            base = orig ? `${base} - ${orig}` : `${base} (${index + 1})`;
+        } else if (orig) {
+            const extMatch = orig.match(/(\.[A-Za-z0-9]{1,8})$/);
+            if (extMatch && !/^\.\d+$/.test(extMatch[1]) && !base.toLowerCase().endsWith(extMatch[1].toLowerCase())) {
+                base += extMatch[1];
+            }
+        }
+        return offline115TruncateByBytes(base, 200);
+    };
+
+    const offline115GetInfoHash = (url) => {
+        const m = String(url || '').match(/urn:btih:([0-9a-zA-Z]{32,40})/i);
+        return m ? m[1].toUpperCase() : '';
+    };
+
+    // 兜底：在目标目录里按名字等结果条目，拿到 fid
+    const offline115WaitDirItemFid = async (cid, name, timeoutMs = 12000) => {
+        const target = String(name || '');
+        if (!target) return null;
+        const strip = (s) => String(s || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').toLowerCase();
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            try {
+                const resp = await api115.get(`https://webapi.115.com/files?aid=1&cid=${cid || '0'}&o=user_ptime&asc=0&offset=0&show_dir=1&limit=30&format=json`);
+                if (resp && resp.state && resp.data) {
+                    const hit = resp.data.find(f => {
+                        const n = f.n || f.name || '';
+                        if (!n) return false;
+                        return n === target || strip(n) === strip(target);
+                    });
+                    if (hit && hit.fid) return String(hit.fid);
+                }
+            } catch (e) { /* 忽略，继续轮询 */ }
+            await new Promise(r => setTimeout(r, 3000));
+        }
+        return null;
+    };
+
+    // 推送完成后按目标名改名：先从离线任务列表定位 fid，兜底扫目录，最后批量改名
+    const offline115RenamePushed = async (cid, entries, logFn) => {
+        const log = logFn || (() => {});
+        const list = (entries || []).filter(e => e && e.link && e.newName);
+        if (list.length === 0) return { ok: 0, fail: 0 };
+
+        log(`✏️ 按标题改名（${list.length} 项）...`);
+        const resolved = new Map(); // link -> {fid, newName}
+        const deadline = Date.now() + 45000;
+
+        while (Date.now() < deadline && resolved.size < list.length) {
+            let tasks = [];
+            try {
+                const resp = await api115.get('https://115.com/web/lixian/?ct=lixian&ac=task_lists&page=1');
+                tasks = (resp && resp.tasks) || [];
+            } catch (e) { /* 忽略，继续轮询 */ }
+            for (const e of list) {
+                if (resolved.has(e.link)) continue;
+                const hash = String(e.hash || offline115GetInfoHash(e.link) || '').toUpperCase();
+                const task = tasks.find(t => {
+                    if (hash && t.info_hash && String(t.info_hash).toUpperCase() === hash) return true;
+                    if (t.url && t.url === e.link) return true;
+                    return false;
+                });
+                if (!task) continue;
+                // BT 任务的 file_id 即该项（目录或文件）的 id；HTTP 直链任务可能为 0，交给目录扫描兜底
+                const fid = task.file_id || task.fid || task.target_fid;
+                if (fid && String(fid) !== '0') resolved.set(e.link, { fid: String(fid), newName: e.newName });
+            }
+            if (resolved.size >= list.length) break;
+            await new Promise(r => setTimeout(r, 3000));
+        }
+
+        for (const e of list) {
+            if (resolved.has(e.link)) continue;
+            const fid = e.origName ? await offline115WaitDirItemFid(cid, e.origName, 12000) : null;
+            if (fid) resolved.set(e.link, { fid, newName: e.newName });
+        }
+
+        const items = [];
+        const seenFid = new Set();
+        for (const b of resolved.values()) {
+            if (seenFid.has(b.fid)) continue; // 同一任务被多条链接命中时只改一次
+            seenFid.add(b.fid);
+            items.push(b);
+        }
+        if (items.length === 0) {
+            log(`  ⚠️ 未定位到刚推送的条目（可能仍在解析），已跳过改名`);
+            return { ok: 0, fail: list.length };
+        }
+
+        let ok = 0, fail = 0;
+        for (let i = 0; i < items.length; i += 50) {
+            const batch = items.slice(i, i + 50);
+            let done = false;
+            try {
+                const r = await offline115BatchRename(batch.map(b => ({ fid: b.fid, file_name: b.newName })));
+                if (r && (r.state === true || r.state === 'true')) {
+                    batch.forEach(b => log(`  ✅ 改名 → ${b.newName}`));
+                    ok += batch.length; done = true;
+                } else {
+                    log(`  ⚠️ 批量改名失败：${(r && (r.error || r.message)) || '未知错误'}，逐条重试`);
+                }
+            } catch (e) {
+                log(`  ⚠️ 批量改名异常：${e.message}，逐条重试`);
+            }
+            if (!done) {
+                for (const b of batch) {
+                    try {
+                        const r = await offline115BatchRename([{ fid: b.fid, file_name: b.newName }]);
+                        if (r && (r.state === true || r.state === 'true')) { ok++; log(`  ✅ 改名 → ${b.newName}`); }
+                        else { fail++; log(`  ❌ 改名失败 → ${b.newName}`); }
+                    } catch (e) { fail++; log(`  ❌ 改名异常 → ${b.newName}`); }
+                    await new Promise(r2 => setTimeout(r2, 800));
+                }
+            }
+        }
+        if (list.length > items.length) fail += list.length - items.length;
+        log(`✏️ 改名完成：${ok} 成功，${fail} 失败`);
+        return { ok, fail };
+    };
+
+    // 推送核心（列表页/详情页共用）：opts.title 存在时，推完按标题改名
+    const offline115PushLinks = async (links, btn, opts = {}) => {
+        const folderNameOverride = opts.folderNameOverride;
+        const title = opts.title || '';
+        const logTag = opts.logTag || '从帖子推送';
+        const cid = (document.getElementById('offline115-cid')?.value || '0').trim() || '0';
+        const newFolder = folderNameOverride !== undefined
+            ? folderNameOverride
+            : ((document.getElementById('offline115-newfolder')?.value || '').trim());
+        const logEl = document.getElementById('offline115-log');
+        if (btn) { btn.disabled = true; }
+        const origText = btn ? btn.innerText : '';
+        if (btn) btn.innerText = '推送中...';
+
+        const log = (msg) => {
+            if (logEl) { logEl.innerText += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+        };
+
+        log(`\n--- ${logTag} (${links.length} 条) ---`);
+
+        let targetCid = cid;
+        if (newFolder) {
+            log(`📁 创建文件夹「${newFolder}」...`);
+            try {
+                const createResp = await offline115CreateFolder(targetCid, newFolder);
+                if (createResp.state && createResp.cid) {
+                    targetCid = createResp.cid;
+                    log(`✅ 文件夹创建成功 (CID: ${targetCid})`);
+                } else if (createResp.errno === 20004 || (createResp.error && createResp.error.includes('已存在'))) {
+                    log(`ℹ️ 文件夹已存在，查找中...`);
+                    const existingCid = await offline115FindFolder(targetCid, newFolder);
+                    if (existingCid) { targetCid = existingCid; log(`✅ 找到已有文件夹 (CID: ${targetCid})`); }
+                }
+            } catch (e) { log(`⚠️ 文件夹处理失败: ${e.message}`); }
+        }
+
+        let ok = 0, fail = 0;
+        const pushed = [];
+        for (let i = 0; i < links.length; i++) {
+            const link = links[i];
+            const short = link.length > 60 ? link.substring(0, 60) + '...' : link;
+            try {
+                const resp = await offline115AddTask(link, targetCid);
+                if (resp.state === true || resp.state === 'true' || resp.error_code === 10008) {
+                    ok++; log(`  [${i + 1}/${links.length}] ✅ ${short}`);
+                    pushed.push({ link, index: i, hash: (resp && resp.info_hash) || '' });
+                } else {
+                    fail++; log(`  [${i + 1}/${links.length}] ❌ ${resp.error_msg || '失败'}`);
+                }
+            } catch (e) { fail++; log(`  [${i + 1}/${links.length}] ❌ ${e.message}`); }
+        }
+        log(`🎉 推送完成：${ok} 成功，${fail} 失败`);
+
+        const willRename = !!(title && pushed.length > 0);
+        if (btn) {
+            btn.innerText = `✅ ${ok}/${links.length}`;
+            // 改名期间保持禁用，避免重复推送
+            if (!willRename) setTimeout(() => { btn.innerText = origText; btn.disabled = false; }, 3000);
+        }
+
+        // 按帖子标题改名（仅新按钮触发）
+        if (willRename) {
+            const entries = pushed.map(p => {
+                const origName = offline115GuessOrigName(p.link);
+                return {
+                    link: p.link,
+                    hash: p.hash || offline115GetInfoHash(p.link),
+                    origName,
+                    newName: offline115BuildTitleName(title, origName, p.index, links.length)
+                };
+            }).filter(e => e.newName);
+            if (entries.length === 0) {
+                log(`  ⚠️ 标题套用规则后为空，未改名`);
+            } else {
+                await offline115RenamePushed(targetCid, entries, log);
+            }
+            if (btn) { btn.innerText = origText; btn.disabled = false; }
+        }
+
+        const quotaEl = document.getElementById('offline115-quota');
+        if (quotaEl) {
+            const quota = await offline115GetQuota();
+            if (quota) {
+                quotaEl.innerText = `📊 配额：剩 ${quota.remain} / 总 ${quota.total} 个${quota.maxSize ? ' (容量 ' + quota.maxSize + 'GB)' : ''}`;
+                quotaEl.style.color = quota.remain < 100 ? '#dc3545' : quota.remain < 500 ? '#ffc107' : '#888';
+            }
+        }
+        return { ok, fail };
+    };
+
+    // 「推送+标题」按钮工厂：沿用原按钮样式，保证大小形状一致
+    const offline115MakeTitleBtn = (refBtn, linksOrFn, titleOrFn, label) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.innerText = label || '☁️ 推送+标题';
+        b.title = '推送并按帖子标题重命名（套用设置中的重命名规则）';
+        b.style.cssText = refBtn.style.cssText;
+        b.onclick = (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            const links = typeof linksOrFn === 'function' ? linksOrFn() : linksOrFn;
+            const t = (typeof titleOrFn === 'function' ? titleOrFn() : titleOrFn) || '';
+            if (!t) { showToast('未找到帖子标题，无法按标题改名', 'error'); return; }
+            offline115PushLinks(links, b, { title: t, logTag: '按标题推送' });
+        };
+        // 纯图标小按钮：插入后锁定为原按钮宽度，保证外形一致
+        if ((label || '').length <= 4) {
+            requestAnimationFrame(() => {
+                const w = refBtn.getBoundingClientRect().width;
+                if (w > 0) {
+                    b.style.width = Math.round(w) + 'px';
+                    b.style.padding = '0';
+                    b.style.boxSizing = 'border-box';
+                    b.style.textAlign = 'center';
+                    b.style.whiteSpace = 'nowrap';
+                    b.style.overflow = 'hidden';
+                }
+            });
+        }
+        return b;
     };
 
     // 自动重命名：扫描目录中文件/文件夹，应用重命名规则
@@ -2283,27 +2584,38 @@
     offline115FavMaxRow.appendChild(offline115FavMaxSelect);
     settingsPanel.appendChild(offline115FavMaxRow);
 
-    // 115 推送后重命名规则
+    // 115 按标题重命名规则（「删除」与「替换」两种模式并存）
     const renameRulesWrap = document.createElement('div');
     renameRulesWrap.style.cssText = 'padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
-    renameRulesWrap.innerHTML = `<div style="font-weight:bold; font-size:13px; margin-bottom:5px;">✏️ 推送后自动重命名规则</div>`;
+    renameRulesWrap.innerHTML = `<div style="font-weight:bold; font-size:13px; margin-bottom:2px;">✏️ 按标题重命名 · 删除指定文字</div>`
+        + `<div style="font-size:11px; color:#888; margin-bottom:5px; line-height:1.5;">规则依次作用于帖子标题（不是文件名）。选「删除」即删掉这段文字，选「替换」则换成别的文字。</div>`;
     const renameListDiv = document.createElement('div');
     renameListDiv.style.cssText = 'max-height:120px; overflow-y:auto;';
     renameRulesWrap.appendChild(renameListDiv);
 
     const renameAddRow = document.createElement('div');
-    renameAddRow.style.cssText = 'display: flex; gap: 4px; margin-top: 6px;';
+    renameAddRow.style.cssText = 'display: flex; gap: 4px; margin-top: 6px; align-items:center;';
+    const renameModeSelect = document.createElement('select');
+    renameModeSelect.style.cssText = 'padding:3px 2px; font-size:11px; border:1px solid #ccc; border-radius:3px; cursor:pointer; flex-shrink:0;';
+    renameModeSelect.innerHTML = '<option value="del">删除</option><option value="replace">替换</option>';
     const renameFindInput = document.createElement('input');
-    renameFindInput.type = 'text'; renameFindInput.placeholder = '查找字符';
-    renameFindInput.style.cssText = 'flex:1; padding:3px 5px; font-size:11px; border:1px solid #ccc; border-radius:3px;';
+    renameFindInput.type = 'text'; renameFindInput.placeholder = '要删除的文字';
+    renameFindInput.style.cssText = 'flex:1; min-width:0; padding:3px 5px; font-size:11px; border:1px solid #ccc; border-radius:3px;';
     const renameSep = document.createElement('span');
-    renameSep.innerText = '→'; renameSep.style.cssText = 'font-size:11px; color:#888; line-height:24px;';
+    renameSep.innerText = '→'; renameSep.style.cssText = 'font-size:11px; color:#888; line-height:24px; display:none;';
     const renameReplaceInput = document.createElement('input');
     renameReplaceInput.type = 'text'; renameReplaceInput.placeholder = '替换为';
-    renameReplaceInput.style.cssText = 'flex:1; padding:3px 5px; font-size:11px; border:1px solid #ccc; border-radius:3px;';
+    renameReplaceInput.style.cssText = 'flex:1; min-width:0; padding:3px 5px; font-size:11px; border:1px solid #ccc; border-radius:3px; display:none;';
     const renameAddBtn = document.createElement('button');
     renameAddBtn.type = 'button'; renameAddBtn.innerText = '+';
-    renameAddBtn.style.cssText = 'padding:3px 8px; font-size:11px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:3px;';
+    renameAddBtn.style.cssText = 'padding:3px 8px; font-size:11px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:3px; flex-shrink:0;';
+    renameModeSelect.onchange = () => {
+        const isDel = renameModeSelect.value !== 'replace';
+        renameFindInput.placeholder = isDel ? '要删除的文字' : '查找字符';
+        renameSep.style.display = isDel ? 'none' : 'inline';
+        renameReplaceInput.style.display = isDel ? 'none' : 'block';
+    };
+    renameAddRow.appendChild(renameModeSelect);
     renameAddRow.appendChild(renameFindInput);
     renameAddRow.appendChild(renameSep);
     renameAddRow.appendChild(renameReplaceInput);
@@ -2320,10 +2632,27 @@
         rules.forEach((rule, i) => {
             const tag = document.createElement('div');
             tag.style.cssText = 'display:flex; align-items:center; gap:4px; font-size:11px; padding:2px 0;';
-            tag.innerHTML = `<span style="color:#007bff;">${rule.find}</span><span style="color:#888;">→</span><span style="color:#28a745;">${rule.replace}</span>`;
+            const isDel = !rule.replace;
+            const badge = document.createElement('span');
+            badge.innerText = isDel ? '删除' : '替换';
+            badge.style.cssText = 'flex-shrink:0; padding:0 4px; border-radius:2px; color:#fff; font-size:10px; background:' + (isDel ? '#dc3545' : '#0d6efd') + ';';
+            const findSpan = document.createElement('span');
+            findSpan.innerText = rule.find || '';
+            findSpan.style.cssText = 'color:#007bff; word-break:break-all;';
+            tag.appendChild(badge);
+            tag.appendChild(findSpan);
+            if (!isDel) {
+                const arrow = document.createElement('span');
+                arrow.innerText = '→'; arrow.style.cssText = 'color:#888; flex-shrink:0;';
+                const repSpan = document.createElement('span');
+                repSpan.innerText = rule.replace;
+                repSpan.style.cssText = 'color:#28a745; word-break:break-all;';
+                tag.appendChild(arrow);
+                tag.appendChild(repSpan);
+            }
             const delBtn = document.createElement('span');
             delBtn.innerText = '×';
-            delBtn.style.cssText = 'color:#dc3545; cursor:pointer; font-weight:bold; margin-left:auto;';
+            delBtn.style.cssText = 'color:#dc3545; cursor:pointer; font-weight:bold; margin-left:auto; flex-shrink:0;';
             delBtn.onclick = () => {
                 STATE.offline115RenameRules.splice(i, 1);
                 saveState('offline_115_rename_rules', STATE.offline115RenameRules);
@@ -2334,10 +2663,11 @@
         });
     };
     renameAddBtn.onclick = () => {
+        const mode = renameModeSelect.value === 'replace' ? 'replace' : 'del';
         const find = renameFindInput.value.trim();
-        const replace = renameReplaceInput.value.trim();
+        const replace = mode === 'del' ? '' : renameReplaceInput.value.trim();
         if (!find) return;
-        STATE.offline115RenameRules.push({ find, replace });
+        STATE.offline115RenameRules.push({ find, replace, mode });
         saveState('offline_115_rename_rules', STATE.offline115RenameRules);
         renameFindInput.value = ''; renameReplaceInput.value = '';
         renderRenameRules();
@@ -3521,69 +3851,16 @@
             });
             const everyLink = [...allLinks, ...txtLinks];
 
-            // 一键推送函数（日志同步到115面板）
+            // 本楼所属帖子的标题（用于「推送+标题」改名）
+            const postTitle = (() => {
+                const a = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                return a ? a.innerText.trim().replace(/\s+/g, ' ') : '';
+            })();
+
+            // 一键推送函数（日志同步到115面板，实现见 offline115PushLinks）
             // folderNameOverride: 传入则使用该文件夹名（离线保存目录仍用面板原设置），否则用面板新建文件夹输入框
             const pushLinksTo115 = async (links, btn, folderNameOverride) => {
-                const cid = document.getElementById('offline115-cid').value.trim() || '0';
-                const newFolder = folderNameOverride !== undefined
-                    ? folderNameOverride
-                    : document.getElementById('offline115-newfolder').value.trim();
-                const logEl = document.getElementById('offline115-log');
-                btn.disabled = true;
-                const origText = btn.innerText;
-                btn.innerText = '推送中...';
-
-                const log = (msg) => {
-                    if (logEl) { logEl.innerText += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
-                };
-
-                log(`\n--- 从帖子提取推送 (${links.length} 条) ---`);
-
-                let targetCid = cid;
-                if (newFolder) {
-                    log(`📁 创建文件夹「${newFolder}」...`);
-                    try {
-                        const createResp = await offline115CreateFolder(targetCid, newFolder);
-                        if (createResp.state && createResp.cid) {
-                            targetCid = createResp.cid;
-                            log(`✅ 文件夹创建成功 (CID: ${targetCid})`);
-                        } else if (createResp.errno === 20004 || (createResp.error && createResp.error.includes('已存在'))) {
-                            log(`ℹ️ 文件夹已存在，查找中...`);
-                            const existingCid = await offline115FindFolder(targetCid, newFolder);
-                            if (existingCid) { targetCid = existingCid; log(`✅ 找到已有文件夹 (CID: ${targetCid})`); }
-                        }
-                    } catch (e) { log(`⚠️ 文件夹处理失败: ${e.message}`); }
-                }
-
-                let ok = 0, fail = 0;
-                for (let i = 0; i < links.length; i++) {
-                    const link = links[i];
-                    const short = link.length > 60 ? link.substring(0, 60) + '...' : link;
-                    try {
-                        const resp = await offline115AddTask(link, targetCid);
-                        if (resp.state === true || resp.state === 'true' || resp.error_code === 10008) {
-                            ok++; log(`  [${i+1}/${links.length}] ✅ ${short}`);
-                        } else {
-                            fail++; log(`  [${i+1}/${links.length}] ❌ ${resp.error_msg || '失败'}`);
-                        }
-                    } catch (e) { fail++; log(`  [${i+1}/${links.length}] ❌ ${e.message}`); }
-                }
-                log(`🎉 推送完成：${ok} 成功，${fail} 失败`);
-                btn.innerText = `✅ ${ok}/${links.length}`;
-                setTimeout(() => { btn.innerText = origText; btn.disabled = false; }, 3000);
-                // 刷新配额
-                const quotaEl = document.getElementById('offline115-quota');
-                if (quotaEl) {
-                    const quota = await offline115GetQuota();
-                    if (quota) {
-                        quotaEl.innerText = `📊 配额：剩 ${quota.remain} / 总 ${quota.total} 个${quota.maxSize ? ' (容量 ' + quota.maxSize + 'GB)' : ''}`;
-                        quotaEl.style.color = quota.remain < 100 ? '#dc3545' : quota.remain < 500 ? '#ffc107' : '#888';
-                    }
-                }
-                // 压缩包自动解压
-                // TODO: 解压和重命名待修复后启用
-                // await offline115ExtractArchives(links, targetCid, log);
-                // await offline115AutoRename(targetCid, log);
+                return offline115PushLinks(links, btn, { folderNameOverride, logTag: '从帖子提取推送' });
             };
 
             // 链接合并文本框
@@ -3612,6 +3889,9 @@
                 pushAllBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 24px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 pushAllBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); pushLinksTo115(everyLink, pushAllBtn); };
                 linkBtnRow.appendChild(pushAllBtn);
+
+                // 推送全部并按帖子标题重命名
+                linkBtnRow.appendChild(offline115MakeTitleBtn(pushAllBtn, everyLink, postTitle, '☁️ 推送+标题'));
 
                 // 按帖子标题新建文件夹并推送全部链接
                 const pushFolderBtn = document.createElement('button');
@@ -3655,6 +3935,9 @@
                     linePushBtn.title = '推送到115';
                     linePushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); pushLinksTo115([link], linePushBtn); };
                     lineDiv.appendChild(linePushBtn);
+
+                    // 推送单条并按帖子标题重命名
+                    lineDiv.appendChild(offline115MakeTitleBtn(linePushBtn, [link], postTitle, '☁️✏️'));
 
                     linkListDiv.appendChild(lineDiv);
                 });
@@ -5763,69 +6046,10 @@
         }
 
 
-        // 详情页推送函数（复用115面板的目录设置）
+        // 详情页推送函数（实现见 offline115PushLinks，复用115面板的目录设置）
         // folderNameOverride: 传入则使用该文件夹名（离线保存目录仍用面板原设置），否则用面板新建文件夹输入框
         const detailPushTo115 = async (links, btn, folderNameOverride) => {
-            const cid = document.getElementById('offline115-cid')?.value?.trim() || '0';
-            const newFolder = folderNameOverride !== undefined
-                ? folderNameOverride
-                : (document.getElementById('offline115-newfolder')?.value?.trim() || '');
-            const logEl = document.getElementById('offline115-log');
-            btn.disabled = true;
-            const origText = btn.innerText;
-            btn.innerText = '推送中...';
-
-            const log = (msg) => {
-                if (logEl) { logEl.innerText += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
-            };
-
-            log(`\n--- 从帖子详情推送 (${links.length} 条) ---`);
-
-            let targetCid = cid;
-            if (newFolder) {
-                log(`📁 创建文件夹「${newFolder}」...`);
-                try {
-                    const createResp = await offline115CreateFolder(targetCid, newFolder);
-                    if (createResp.state && createResp.cid) {
-                        targetCid = createResp.cid;
-                        log(`✅ 文件夹创建成功 (CID: ${targetCid})`);
-                    } else if (createResp.errno === 20004 || (createResp.error && createResp.error.includes('已存在'))) {
-                        log(`ℹ️ 文件夹已存在，查找中...`);
-                        const existingCid = await offline115FindFolder(targetCid, newFolder);
-                        if (existingCid) { targetCid = existingCid; log(`✅ 找到已有文件夹 (CID: ${targetCid})`); }
-                    }
-                } catch (e) { log(`⚠️ 文件夹处理失败: ${e.message}`); }
-            }
-
-            let ok = 0, fail = 0;
-            for (let i = 0; i < links.length; i++) {
-                const link = links[i];
-                const short = link.length > 60 ? link.substring(0, 60) + '...' : link;
-                try {
-                    const resp = await offline115AddTask(link, targetCid);
-                    if (resp.state === true || resp.state === 'true' || resp.error_code === 10008) {
-                        ok++; log(`  [${i+1}/${links.length}] ✅ ${short}`);
-                    } else {
-                        fail++; log(`  [${i+1}/${links.length}] ❌ ${resp.error_msg || '失败'}`);
-                    }
-                } catch (e) { fail++; log(`  [${i+1}/${links.length}] ❌ ${e.message}`); }
-            }
-            log(`🎉 推送完成：${ok} 成功，${fail} 失败`);
-            btn.innerText = `✅ ${ok}/${links.length}`;
-            setTimeout(() => { btn.innerText = origText; btn.disabled = false; }, 3000);
-            // 自动解压 + 重命名
-            // TODO: 解压和重命名待修复后启用
-            // await offline115ExtractArchives(links, targetCid, log);
-            // await offline115AutoRename(targetCid, log);
-            // 刷新配额
-            const quotaEl = document.getElementById('offline115-quota');
-            if (quotaEl) {
-                const quota = await offline115GetQuota();
-                if (quota) {
-                    quotaEl.innerText = `📊 配额：剩 ${quota.remain} / 总 ${quota.total} 个${quota.maxSize ? ' (容量 ' + quota.maxSize + 'GB)' : ''}`;
-                    quotaEl.style.color = quota.remain < 100 ? '#dc3545' : quota.remain < 500 ? '#ffc107' : '#888';
-                }
-            }
+            return offline115PushLinks(links, btn, { folderNameOverride, logTag: '从帖子详情推送' });
         };
 
         // 遍历所有楼层
@@ -5874,7 +6098,13 @@
                     ev.preventDefault(); ev.stopPropagation();
                     detailPushTo115([href], pushBtn);
                 };
-                return pushBtn;
+                // 推送单条并按帖子标题重命名（紧随右侧，同尺寸）
+                const titleBtn = offline115MakeTitleBtn(pushBtn, [href], () => _detailTitle, '☁️✏️');
+                const btnWrap = document.createElement('span');
+                btnWrap.style.cssText = 'display:inline-block; white-space:nowrap;';
+                btnWrap.appendChild(pushBtn);
+                btnWrap.appendChild(titleBtn);
+                return btnWrap;
             };
 
             // 1. <a> 标签形式的 magnet/ed2k 链接 → 紧贴链接右侧
@@ -6125,6 +6355,8 @@
                 pushAllBtn.style.cssText = 'font-size:11px; cursor:pointer; padding:3px 14px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 pushAllBtn.onclick = () => { detailPushTo115(allLinks, pushAllBtn); };
                 btnRow.appendChild(pushAllBtn);
+                // 推送全部并按帖子标题重命名
+                btnRow.appendChild(offline115MakeTitleBtn(pushAllBtn, allLinks, () => _detailTitle, '☁️ 推送+标题'));
                 extractPopup.appendChild(btnRow);
 
                 // 链接列表
@@ -6150,6 +6382,8 @@
                     pushBtn.title = '推送到115';
                     pushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); detailPushTo115([link], pushBtn); };
                     line.appendChild(pushBtn);
+                    // 推送单条并按帖子标题重命名
+                    line.appendChild(offline115MakeTitleBtn(pushBtn, [link], () => _detailTitle, '☁️✏️'));
                     linkList.appendChild(line);
                 });
                 extractPopup.appendChild(linkList);
@@ -6205,6 +6439,9 @@
                 cardPushBtn.onclick = () => { detailPushTo115(allLinks, cardPushBtn); };
                 cardBtnRow.appendChild(cardPushBtn);
 
+                // 推送全部并按帖子标题重命名
+                cardBtnRow.appendChild(offline115MakeTitleBtn(cardPushBtn, allLinks, () => _detailTitle, '☁️ 推送+标题'));
+
                 // 按帖子标题新建文件夹并推送全部链接
                 const cardFolderBtn = document.createElement('button');
                 cardFolderBtn.type = 'button'; cardFolderBtn.innerText = '📁 按标题建文件夹推送';
@@ -6245,6 +6482,8 @@
                     pushBtn.title = '推送到115';
                     pushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); detailPushTo115([link], pushBtn); };
                     line.appendChild(pushBtn);
+                    // 推送单条并按帖子标题重命名
+                    line.appendChild(offline115MakeTitleBtn(pushBtn, [link], () => _detailTitle, '☁️✏️'));
                     cardLinkList.appendChild(line);
                 });
                 cardWrap.appendChild(cardLinkList);
