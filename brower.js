@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.13
+// @version      15.14
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -43,6 +43,7 @@
         imageCount: GM_getValue('custom_image_count', 2),
         imageSize: GM_getValue('custom_image_size', '120px'),
         imageDisplayMode: GM_getValue('custom_image_display_mode', 'stack'), // 'stack' | 'scroll' 图片展示方式
+        listColumns: GM_getValue('custom_list_columns', 3), // 列表页多列显示，1=关闭，2~5=列数
         buttonStyle: GM_getValue('custom_button_style', 'rect'), // 'rect' | 'circle' 收藏/打开按钮样式
         scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
         scrollJumpAmount: GM_getValue('custom_scroll_jump_amount', '2/3'), // '1' | '2/3' | '1/2' 快捷跳转量
@@ -102,6 +103,7 @@
     if (!Array.isArray(STATE.readLinks)) STATE.readLinks = [];
     if (!Array.isArray(STATE.hiddenTids)) STATE.hiddenTids = [];
     if (!Array.isArray(STATE.bookmarks)) STATE.bookmarks = [];
+    STATE.listColumns = Math.max(1, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
     STATE.tempUnhiddenSet = new Set(); // 会话级临时解除隐藏，刷新后恢复
 
     // ================= 书签操作 =================
@@ -266,6 +268,132 @@
                 flex-wrap: wrap !important;
             }
         }
+
+        /* ============ 列表页多列网格布局 ============ */
+        table.custom-grid-mode {
+            display: flex !important;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            gap: 10px;
+            width: 100% !important;
+            table-layout: auto !important;
+            border-collapse: separate !important;
+            border-spacing: 0 !important;
+        }
+        table.custom-grid-mode > colgroup,
+        table.custom-grid-mode > thead { display: none !important; }
+        /* 帖子卡片 */
+        table.custom-grid-mode > tbody[id^="normalthread_"] {
+            display: block;
+            flex: 0 0 calc((100% - (var(--custom-cols, 3) - 1) * 10px) / var(--custom-cols, 3));
+            max-width: calc((100% - (var(--custom-cols, 3) - 1) * 10px) / var(--custom-cols, 3));
+            box-sizing: border-box;
+            margin: 0 !important;
+            padding: 8px 10px;
+            background: #fff;
+            border: 1px solid #e3e6ea;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"]:hover {
+            border-color: #c9d4e3;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        /* 分页分隔行 / 页脚等非帖子 tbody 占满整行 */
+        table.custom-grid-mode > tbody:not([id^="normalthread_"]) {
+            display: block;
+            flex: 0 0 100%;
+            max-width: 100%;
+        }
+        /* 隐藏类优先级最高 */
+        table.custom-grid-mode > tbody.custom-hidden { display: none !important; }
+        /* 卡片内：第一行 [勾选][标题]，第二行 [作者][回复数] */
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            column-gap: 6px;
+            row-gap: 2px;
+            align-items: baseline;
+            margin: 0;
+            border: none !important;
+            background: none !important;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td,
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > th {
+            display: block;
+            border: none !important;
+            padding: 0 !important;
+            background: none !important;
+            text-align: left !important;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.icn {
+            grid-column: 1; grid-row: 1;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > th.common {
+            grid-column: 2 / span 2; grid-row: 1;
+            min-width: 0 !important;
+            font-weight: normal;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.by,
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.num,
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.frm {
+            grid-row: 2;
+            font-size: 11px;
+            color: #888;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.frm { grid-column: 1; }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.by { grid-column: 2; }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.num { grid-column: 3; justify-self: end; }
+        /* 标题换行，不撑破卡片 */
+        table.custom-grid-mode > tbody[id^="normalthread_"] th a.xst,
+        table.custom-grid-mode > tbody[id^="normalthread_"] th a[href*="thread-"] {
+            white-space: normal !important;
+            word-break: break-word;
+            line-height: 1.45;
+        }
+        /* 卡片内的提取区 */
+        table.custom-grid-mode .custom-extracted {
+            padding-left: 0 !important;
+            gap: 6px !important;
+        }
+        table.custom-grid-mode .custom-extracted > div {
+            min-width: 0 !important;
+        }
+        table.custom-grid-mode .custom-extracted button {
+            max-width: 100%;
+        }
+        /* 窄卡片内图片竖向铺满，自适应宽度 */
+        table.custom-grid-mode .custom-extracted img {
+            display: block !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            height: auto !important;
+            max-height: none !important;
+            object-fit: contain !important;
+            margin: 0 0 6px 0 !important;
+            border-radius: 4px;
+        }
+        /* 标题旁的一键复制按钮 */
+        .custom-copy-title {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 0 5px;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #6c757d;
+            background: #f1f3f5;
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+            cursor: pointer;
+            vertical-align: middle;
+            white-space: nowrap;
+            user-select: none;
+        }
+        .custom-copy-title:hover { background: #e2e6ea; color: #333; }
     `);
 
     const tooltip = document.createElement('div');
@@ -1813,7 +1941,48 @@
             addViewedTag(link);
         }
 
-        link.addEventListener('click', () => {
+        // 一键复制标题文字（不触发跳转、不影响已读标记）
+        const copyTitleBtn = document.createElement('span');
+        copyTitleBtn.className = 'custom-copy-title';
+        copyTitleBtn.innerText = '📋';
+        copyTitleBtn.title = '复制标题文字';
+        copyTitleBtn.addEventListener('mousedown', (ev) => { ev.stopPropagation(); });
+        copyTitleBtn.addEventListener('click', (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            const text = (link.innerText || '').trim();
+            const done = () => {
+                copyTitleBtn.innerText = '✓';
+                setTimeout(() => { copyTitleBtn.innerText = '📋'; }, 1500);
+            };
+            const fallback = () => {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand('copy'); } catch (e) {}
+                ta.remove();
+                done();
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done).catch(fallback);
+            } else {
+                fallback();
+            }
+        });
+        link.parentNode.insertBefore(copyTitleBtn, link.nextSibling);
+
+        // 拖选文字时不再误触发跳转
+        let _downX = 0, _downY = 0;
+        link.addEventListener('mousedown', (e) => { _downX = e.clientX; _downY = e.clientY; });
+
+        link.addEventListener('click', (e) => {
+            const moved = Math.abs(e.clientX - _downX) > 6 || Math.abs(e.clientY - _downY) > 6;
+            const sel = window.getSelection();
+            if (moved || (sel && sel.toString().trim().length > 0)) {
+                e.preventDefault();
+                return;
+            }
             markAsRead(url);
             addViewedTag(link);
         });
@@ -1897,10 +2066,29 @@
         observer.observe(threadListContainer, { childList: true, subtree: true });
     }
 
+    // 列表页多列布局：给容器加 class 并写入列数变量
+    const applyListColumns = () => {
+        const table = threadListContainer;
+        if (!table || table.tagName !== 'TABLE') return;
+        const cols = Math.max(1, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
+        if (cols <= 1) {
+            table.classList.remove('custom-grid-mode');
+            table.style.removeProperty('--custom-cols');
+            fixTableColumnWidths();
+            return;
+        }
+        const oldColgroup = table.querySelector('colgroup[data-custom-colgroup]');
+        if (oldColgroup) oldColgroup.remove();
+        table.style.setProperty('--custom-cols', String(cols));
+        table.classList.add('custom-grid-mode');
+    };
+
     // 修复表格列宽：插入 <colgroup> 避免第一页全部隐藏时 table-layout:fixed 列宽塌缩
     const fixTableColumnWidths = () => {
         const table = threadListContainer;
         if (!table || table.tagName !== 'TABLE') return;
+        // 多列网格模式下由弹性宽度接管，不能再插 colgroup
+        if (table.classList.contains('custom-grid-mode')) return;
 
         // 找任意帖子行（含隐藏的）确定列结构
         const anyRow = table.querySelector('tbody[id^="normalthread_"] tr');
@@ -1938,6 +2126,7 @@
         table.insertBefore(colgroup, table.firstChild);
     };
     fixTableColumnWidths();
+    applyListColumns();
 
     // ================= 无缝翻页逻辑 =================
     const autoLoadNextPage = async () => {
@@ -2479,6 +2668,36 @@
     imgDisplayModeRow.appendChild(imgDisplayModeLabel);
     imgDisplayModeRow.appendChild(imgDisplayModeSelect);
     settingsPanel.appendChild(imgDisplayModeRow);
+
+    // 列表页多列布局
+    const listColsRow = document.createElement('div');
+    listColsRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const listColsLabel = document.createElement('span');
+    listColsLabel.innerText = '🗂️ 列表显示列数';
+    listColsLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const listColsSelect = document.createElement('select');
+    listColsSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [
+        { value: 1, label: '单列（原始表格）' },
+        { value: 2, label: '2 列' },
+        { value: 3, label: '3 列' },
+        { value: 4, label: '4 列' },
+        { value: 5, label: '5 列' }
+    ].forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value; o.innerText = opt.label;
+        if (Number(STATE.listColumns) === opt.value) o.selected = true;
+        listColsSelect.appendChild(o);
+    });
+    listColsSelect.onchange = (e) => {
+        STATE.listColumns = Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 3));
+        saveState('custom_list_columns', STATE.listColumns);
+        applyListColumns();
+        showToast(STATE.listColumns <= 1 ? '🗂️ 已切回单列原始表格' : `🗂️ 列表已切换为 ${STATE.listColumns} 列`, 'info');
+    };
+    listColsRow.appendChild(listColsLabel);
+    listColsRow.appendChild(listColsSelect);
+    settingsPanel.appendChild(listColsRow);
 
     // 收藏/打开按钮样式
     const btnStyleRow = document.createElement('div');
