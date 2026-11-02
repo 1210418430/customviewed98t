@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.16
+// @version      15.17
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -368,16 +368,20 @@
         table.custom-grid-mode .custom-extracted button {
             max-width: 100%;
         }
-        /* 窄卡片内图片竖向铺满，自适应宽度 */
+        /* 窄卡片内图片：保持原始大小，只做最大宽度约束，不再强制放大铺满 */
         table.custom-grid-mode .custom-extracted img {
-            display: block !important;
-            width: 100% !important;
+            width: auto !important;
             max-width: 100% !important;
             height: auto !important;
             max-height: none !important;
             object-fit: contain !important;
-            margin: 0 0 6px 0 !important;
             border-radius: 4px;
+            vertical-align: top;
+        }
+        /* 纵向堆叠模式（非横向滚动）下一行一张，按原本尺寸显示 */
+        table.custom-grid-mode .custom-extracted > div:not([style*="overflow-x"]) img {
+            display: block !important;
+            margin: 0 0 6px 0 !important;
         }
         /* 标题下方复制出来的纯文本（可选中复制，不可点击跳转） */
         .custom-title-copy {
@@ -3805,16 +3809,27 @@
         const tbody = cb.closest('tbody');
         if (!tbody) return;
         const existingBox = tbody.querySelector('.custom-extracted');
-        if (existingBox && !existingBox.dataset.refreshing) return;
-        // 如果是刷新模式，移除旧内容
-        if (existingBox) existingBox.remove();
+        const isRefresh = !!(existingBox && existingBox.dataset.refreshing);
+        if (existingBox && !isRefresh) return;
+        // 刷新时先保留旧内容占位（原地替换），避免卡片高度骤降导致浏览器钳制滚动位置（表现为“页面后退一下”）
+        if (existingBox) {
+            delete existingBox.dataset.refreshing;
+            existingBox.style.opacity = '0.5';
+            existingBox.style.pointerEvents = 'none';
+        }
+        const restoreOldBox = () => {
+            if (!existingBox) return;
+            existingBox.style.opacity = '';
+            existingBox.style.pointerEvents = '';
+            delete existingBox.dataset.refreshing;
+        };
 
         const threadUrl = cb.value;
         markAsRead(threadUrl);
         addViewedTag(tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]'));
 
         const data = await fetchThreadData(threadUrl);
-        if (!data) return;
+        if (!data) { restoreOldBox(); return; }
 
         const box = document.createElement('div');
         box.className = 'custom-extracted';
@@ -4022,27 +4037,22 @@
             btnRefresh.style.cssText = 'font-size:12px; cursor:pointer; padding:5px 12px; background:#007bff; color:#fff; border:none; border-radius:3px; font-weight:bold;';
             btnRefresh.onclick = async (e) => {
                 e.preventDefault(); e.stopPropagation();
+                if (btnRefresh.disabled) return;
                 btnRefresh.innerText = '正在刷新...';
                 btnRefresh.disabled = true;
-                // 记录当前滚动位置
-                const scrollY = window.scrollY;
-                const boxRect = box.getBoundingClientRect();
-                const boxOffsetTop = boxRect.top + window.scrollY;
-                // 清除缓存
-                delete STATE.threadCache[threadUrl];
-                // 标记为刷新模式，让 extractSingleThread 允许替换
-                box.dataset.refreshing = '1';
-                // 重新提取
-                await extractSingleThread(cb);
-                // 恢复滚动位置
-                requestAnimationFrame(() => {
-                    const newBox = tbody.querySelector('.custom-extracted');
-                    if (newBox) {
-                        const newBoxRect = newBox.getBoundingClientRect();
-                        const newBoxOffsetTop = newBoxRect.top + window.scrollY;
-                        window.scrollTo(0, scrollY + (newBoxOffsetTop - boxOffsetTop));
-                    }
-                });
+                try {
+                    // 清除缓存
+                    delete STATE.threadCache[threadUrl];
+                    // 标记刷新模式：extractSingleThread 会原地替换内容，不先删除，避免整页滚动位置跳动
+                    const curBox = tbody.querySelector('.custom-extracted');
+                    if (curBox) curBox.dataset.refreshing = '1';
+                    await extractSingleThread(cb);
+                } catch (err) {
+                    showToast('❌ 刷新失败: ' + err.message, 'error');
+                } finally {
+                    btnRefresh.innerText = '🔄 已回复，刷新查看';
+                    btnRefresh.disabled = false;
+                }
             };
             btnRow.appendChild(btnRefresh);
             lockedWrap.appendChild(btnRow);
@@ -4319,11 +4329,14 @@
             box.appendChild(resWrap);
         }
 
-        // 用 rAF 批量插入 DOM，减少画面抖动
+        // 用 rAF 批量插入 DOM，减少画面抖动（刷新时原地替换旧内容，不产生高度塌陷）
         if (box.innerHTML) {
             requestAnimationFrame(() => {
-                tbody.querySelector('th').appendChild(box);
+                if (existingBox && existingBox.isConnected) existingBox.replaceWith(box);
+                else tbody.querySelector('th').appendChild(box);
             });
+        } else {
+            restoreOldBox();
         }
     };
 
