@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.15
+// @version      15.16
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -43,7 +43,9 @@
         imageCount: GM_getValue('custom_image_count', 2),
         imageSize: GM_getValue('custom_image_size', '120px'),
         imageDisplayMode: GM_getValue('custom_image_display_mode', 'stack'), // 'stack' | 'scroll' 图片展示方式
-        listColumns: GM_getValue('custom_list_columns', 3), // 列表页多列显示，1=关闭，2~5=列数
+        listMultiColumn: GM_getValue('custom_list_multi_column', true), // 列表多列开关
+        listColumns: GM_getValue('custom_list_columns', 3), // 列表页多列显示的列数 2~5
+        titleCopyEnabled: GM_getValue('custom_title_copy', true), // 标题下方复制一份纯文本
         buttonStyle: GM_getValue('custom_button_style', 'rect'), // 'rect' | 'circle' 收藏/打开按钮样式
         scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
         scrollJumpAmount: GM_getValue('custom_scroll_jump_amount', '2/3'), // '1' | '2/3' | '1/2' 快捷跳转量
@@ -103,7 +105,7 @@
     if (!Array.isArray(STATE.readLinks)) STATE.readLinks = [];
     if (!Array.isArray(STATE.hiddenTids)) STATE.hiddenTids = [];
     if (!Array.isArray(STATE.bookmarks)) STATE.bookmarks = [];
-    STATE.listColumns = Math.max(1, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
+    STATE.listColumns = Math.max(2, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
     STATE.tempUnhiddenSet = new Set(); // 会话级临时解除隐藏，刷新后恢复
 
     // ================= 书签操作 =================
@@ -377,23 +379,27 @@
             margin: 0 0 6px 0 !important;
             border-radius: 4px;
         }
-        /* 标题旁的一键复制按钮 */
-        .custom-copy-title {
-            display: inline-block;
-            margin-left: 6px;
-            padding: 0 5px;
-            font-size: 11px;
+        /* 标题下方复制出来的纯文本（可选中复制，不可点击跳转） */
+        .custom-title-copy {
+            display: block;
+            margin-top: 3px;
+            padding: 2px 4px;
+            font-size: 12px;
             line-height: 1.5;
-            color: #6c757d;
-            background: #f1f3f5;
-            border: 1px solid #dee2e6;
-            border-radius: 3px;
-            cursor: pointer;
-            vertical-align: middle;
-            white-space: nowrap;
-            user-select: none;
+            color: #555;
+            background: #f7f8fa;
+            border-left: 3px solid #dee2e6;
+            border-radius: 2px;
+            word-break: break-word;
+            white-space: normal;
+            user-select: text;
+            -webkit-user-select: text;
+            cursor: text;
         }
-        .custom-copy-title:hover { background: #e2e6ea; color: #333; }
+        table.custom-grid-mode .custom-title-copy {
+            font-size: 11px;
+            margin-top: 3px;
+        }
     `);
 
     const tooltip = document.createElement('div');
@@ -1898,6 +1904,39 @@
         tooltip.innerHTML = '';
     };
 
+    // 在标题链接下方复制一份纯文本：不是链接，点了不会跳转，可直接选中复制
+    const ensureTitleCopy = (tbody, link) => {
+        if (!link) return;
+        const existing = tbody.querySelector('.custom-title-copy');
+        if (!STATE.titleCopyEnabled) {
+            if (existing) existing.remove();
+            return;
+        }
+        const text = (link.innerText || '').trim();
+        if (!text) return;
+        if (existing) {
+            if (existing.textContent !== text) existing.textContent = text;
+            return;
+        }
+        const span = document.createElement('span');
+        span.className = 'custom-title-copy';
+        span.textContent = text;
+        span.title = '可选中复制（不会打开帖子）';
+        // 追加到标题所在单元格末尾，确保显示在标题下方；「已浏览」标签保持在其前面
+        const cell = link.closest('th.common, th, td') || link.parentNode;
+        const viewedTag = cell.querySelector('.custom-viewed-tag');
+        if (viewedTag) cell.insertBefore(span, viewedTag);
+        else cell.appendChild(span);
+    };
+
+    // 开关切换后，对页面上已有的全部帖子统一应用 / 撤销
+    const applyTitleCopy = () => {
+        document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
+            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            if (link) ensureTitleCopy(tbody, link);
+        });
+    };
+
     const processThreadNode = (tbody) => {
         if (tbody.hasAttribute('data-custom-processed')) return;
         tbody.setAttribute('data-custom-processed', 'true');
@@ -1941,36 +1980,8 @@
             addViewedTag(link);
         }
 
-        // 一键复制标题文字（不触发跳转、不影响已读标记）
-        const copyTitleBtn = document.createElement('span');
-        copyTitleBtn.className = 'custom-copy-title';
-        copyTitleBtn.innerText = '📋';
-        copyTitleBtn.title = '复制标题文字';
-        copyTitleBtn.addEventListener('mousedown', (ev) => { ev.stopPropagation(); });
-        copyTitleBtn.addEventListener('click', (ev) => {
-            ev.preventDefault(); ev.stopPropagation();
-            const text = (link.innerText || '').trim();
-            const done = () => {
-                copyTitleBtn.innerText = '✓';
-                setTimeout(() => { copyTitleBtn.innerText = '📋'; }, 1500);
-            };
-            const fallback = () => {
-                const ta = document.createElement('textarea');
-                ta.value = text;
-                ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
-                document.body.appendChild(ta);
-                ta.select();
-                try { document.execCommand('copy'); } catch (e) {}
-                ta.remove();
-                done();
-            };
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(done).catch(fallback);
-            } else {
-                fallback();
-            }
-        });
-        link.parentNode.insertBefore(copyTitleBtn, link.nextSibling);
+        // 标题下方复制一份纯文本，方便直接选中复制（不会触发跳转）
+        ensureTitleCopy(tbody, link);
 
         // 拖选文字时不再误触发跳转
         let _downX = 0, _downY = 0;
@@ -2070,8 +2081,9 @@
     const applyListColumns = () => {
         const table = threadListContainer;
         if (!table || table.tagName !== 'TABLE') return;
-        const cols = Math.max(1, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
-        if (cols <= 1) {
+        const cols = Math.max(2, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
+        // 总开关关闭 → 回到原始表格
+        if (!STATE.listMultiColumn) {
             table.classList.remove('custom-grid-mode');
             table.style.removeProperty('--custom-cols');
             fixTableColumnWidths();
@@ -2669,7 +2681,29 @@
     imgDisplayModeRow.appendChild(imgDisplayModeSelect);
     settingsPanel.appendChild(imgDisplayModeRow);
 
-    // 列表页多列布局
+    // 列表页多列布局（总开关）
+    const listGridSwitchRow = document.createElement('div');
+    listGridSwitchRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const listGridSwitchLabel = document.createElement('span');
+    listGridSwitchLabel.innerText = '🗂️ 列表多列显示';
+    listGridSwitchLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const listGridSwitch = document.createElement('input');
+    listGridSwitch.type = 'checkbox';
+    listGridSwitch.checked = !!STATE.listMultiColumn;
+    listGridSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    listGridSwitch.onchange = (e) => {
+        STATE.listMultiColumn = e.target.checked;
+        saveState('custom_list_multi_column', STATE.listMultiColumn);
+        applyListColumns();
+        listColsSelect.disabled = !STATE.listMultiColumn;
+        listColsSelect.style.opacity = STATE.listMultiColumn ? '1' : '0.45';
+        showToast(STATE.listMultiColumn ? `🗂️ 已开启多列布局（${STATE.listColumns} 列）` : '🗂️ 已关闭多列，恢复原始表格', 'info');
+    };
+    listGridSwitchRow.appendChild(listGridSwitchLabel);
+    listGridSwitchRow.appendChild(listGridSwitch);
+    settingsPanel.appendChild(listGridSwitchRow);
+
+    // 列表页多列布局（列数）
     const listColsRow = document.createElement('div');
     listColsRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
     const listColsLabel = document.createElement('span');
@@ -2677,8 +2711,9 @@
     listColsLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
     const listColsSelect = document.createElement('select');
     listColsSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    listColsSelect.disabled = !STATE.listMultiColumn;
+    if (!STATE.listMultiColumn) listColsSelect.style.opacity = '0.45';
     [
-        { value: 1, label: '单列（原始表格）' },
         { value: 2, label: '2 列' },
         { value: 3, label: '3 列' },
         { value: 4, label: '4 列' },
@@ -2690,14 +2725,34 @@
         listColsSelect.appendChild(o);
     });
     listColsSelect.onchange = (e) => {
-        STATE.listColumns = Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 3));
+        STATE.listColumns = Math.max(2, Math.min(5, parseInt(e.target.value, 10) || 3));
         saveState('custom_list_columns', STATE.listColumns);
         applyListColumns();
-        showToast(STATE.listColumns <= 1 ? '🗂️ 已切回单列原始表格' : `🗂️ 列表已切换为 ${STATE.listColumns} 列`, 'info');
+        showToast(`🗂️ 列表已切换为 ${STATE.listColumns} 列`, 'info');
     };
     listColsRow.appendChild(listColsLabel);
     listColsRow.appendChild(listColsSelect);
     settingsPanel.appendChild(listColsRow);
+
+    // 标题下方显示可复制的纯文本
+    const titleCopyRow = document.createElement('div');
+    titleCopyRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const titleCopyLabel = document.createElement('span');
+    titleCopyLabel.innerText = '📄 标题下方显示可复制文本';
+    titleCopyLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const titleCopySwitch = document.createElement('input');
+    titleCopySwitch.type = 'checkbox';
+    titleCopySwitch.checked = !!STATE.titleCopyEnabled;
+    titleCopySwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    titleCopySwitch.onchange = (e) => {
+        STATE.titleCopyEnabled = e.target.checked;
+        saveState('custom_title_copy', STATE.titleCopyEnabled);
+        applyTitleCopy();
+        showToast(STATE.titleCopyEnabled ? '📄 已在标题下方显示可复制文本' : '📄 已移除标题下方的文本', 'info');
+    };
+    titleCopyRow.appendChild(titleCopyLabel);
+    titleCopyRow.appendChild(titleCopySwitch);
+    settingsPanel.appendChild(titleCopyRow);
 
     // 收藏/打开按钮样式
     const btnStyleRow = document.createElement('div');
