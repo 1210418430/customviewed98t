@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.14
+// @version      15.15
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -23,8 +23,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @require      https://lib.baomitu.com/jszip/3.10.1/jszip.min.js
-// @downloadURL https://raw.githubusercontent.com/1210418430/customviewed98t/master/brower.js
-// @updateURL https://raw.githubusercontent.com/1210418430/customviewed98t/master/brower.js
+// @downloadURL https://raw.githubusercontent.com/1210418430/customviewed98t/main/brower.js
+// @updateURL https://raw.githubusercontent.com/1210418430/customviewed98t/main/brower.js
 // ==/UserScript==
 
 (function() {
