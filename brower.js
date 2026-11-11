@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.17
+// @version      15.18
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -295,7 +295,8 @@
             background: #fff;
             border: 1px solid #e3e6ea;
             border-radius: 8px;
-            overflow: hidden;
+            /* 注意：这里不能用 overflow:hidden，否则卡片内的 sticky 标题会失效 */
+            overflow: visible;
         }
         table.custom-grid-mode > tbody[id^="normalthread_"]:hover {
             border-color: #c9d4e3;
@@ -382,6 +383,21 @@
         table.custom-grid-mode .custom-extracted > div:not([style*="overflow-x"]) img {
             display: block !important;
             margin: 0 0 6px 0 !important;
+        }
+        /* 卡片标题吸顶：卡片内容（图片/链接）比屏幕还高时，向下滚动标题始终可见 */
+        table.custom-grid-mode .custom-card-head {
+            position: sticky;
+            /* 若站点顶部有固定导航栏挡住标题，把 --custom-sticky-top 调成导航栏高度即可 */
+            top: var(--custom-sticky-top, 0px);
+            z-index: 6;
+            background: #fff;
+            padding-bottom: 4px;
+            /* 吸顶时盖住下方滚动内容，加一点极淡的分隔感 */
+            box-shadow: 0 4px 8px -6px rgba(0,0,0,0.35);
+        }
+        /* 高亮帖子的卡片底色是淡黄，吸顶标题要跟着变，否则会出现白色补丁 */
+        table.custom-grid-mode > tbody.custom-highlight .custom-card-head {
+            background: #fffacd;
         }
         /* 标题下方复制出来的纯文本（可选中复制，不可点击跳转） */
         .custom-title-copy {
@@ -1908,6 +1924,26 @@
         tooltip.innerHTML = '';
     };
 
+    // 标题吸顶容器：把标题链接及其附属标签（勾选框 / 已浏览 / 可复制文本）收进 .custom-card-head，
+    // 多列卡片被图片撑得比屏幕更高时，向下滚动标题会一直吸附在顶部
+    const ensureCardHead = (tbody, link) => {
+        if (!link) return null;
+        const inHead = link.closest('.custom-card-head');
+        if (inHead) return inHead;
+        const cell = link.closest('th.common, th, td');
+        if (!cell) return null;
+        const head = document.createElement('div');
+        head.className = 'custom-card-head';
+        cell.insertBefore(head, cell.firstChild);
+        // 把单元格里除提取区以外的元素按原顺序搬进来，保证勾选框、标题、各种小标签的相对位置不变
+        Array.from(cell.childNodes).forEach(node => {
+            if (node === head || node.nodeType !== 1) return;
+            if (node.classList.contains('custom-extracted')) return;
+            head.appendChild(node);
+        });
+        return head;
+    };
+
     // 在标题链接下方复制一份纯文本：不是链接，点了不会跳转，可直接选中复制
     const ensureTitleCopy = (tbody, link) => {
         if (!link) return;
@@ -1926,8 +1962,8 @@
         span.className = 'custom-title-copy';
         span.textContent = text;
         span.title = '可选中复制（不会打开帖子）';
-        // 追加到标题所在单元格末尾，确保显示在标题下方；「已浏览」标签保持在其前面
-        const cell = link.closest('th.common, th, td') || link.parentNode;
+        // 追加到标题所在容器末尾，确保显示在标题下方；「已浏览」标签保持在其前面
+        const cell = link.closest('.custom-card-head') || link.closest('th.common, th, td') || link.parentNode;
         const viewedTag = cell.querySelector('.custom-viewed-tag');
         if (viewedTag) cell.insertBefore(span, viewedTag);
         else cell.appendChild(span);
@@ -1951,6 +1987,9 @@
         const title = link.innerText;
         const url = link.href;
 
+        // 标题吸顶容器（多列卡片里长帖向下滚动时，标题常驻顶部）
+        const cardHead = ensureCardHead(tbody, link);
+
         const authorNode = tbody.querySelector('td.by cite a');
         const authorName = authorNode ? authorNode.innerText.trim() : '';
         let authorUID = '';
@@ -1965,7 +2004,7 @@
         cb.className = 'custom-thread-checkbox';
         cb.value = url;
         cb.style.cssText = 'width: 16px; height: 16px; margin-right: 8px; vertical-align: middle; cursor: pointer;';
-        link.parentNode.insertBefore(cb, link);
+        (cardHead || link.parentNode).insertBefore(cb, link);
 
         const isKeywordBlocked = STATE.blocked.some(kw => title.includes(kw));
         const isUserBlocked = STATE.blockedUsers.includes(authorName) || (authorUID && STATE.blockedUsers.includes(authorUID));
