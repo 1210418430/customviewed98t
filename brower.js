@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.18
+// @version      15.19
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -1924,6 +1924,59 @@
         tooltip.innerHTML = '';
     };
 
+    // ============ 标题吸顶的前置修复 ============
+    // 只要任一祖先元素的 overflow 不是 visible，它就会成为「滚动容器」，
+    // 内部的 position:sticky 会改为相对它吸附（而它本身并不滚动），表现就是吸顶完全失效。
+    // 论坛主题里 #wp / .bm / body 等常见 overflow:hidden（清浮动用），就是这个坑的来源。
+    // overflow:clip 的裁剪效果与 hidden 一致，但不会产生滚动容器，sticky 才能相对视口生效。
+    const stickyStyleBackup = new Map(); // node -> Map(prop -> [value, priority])
+    let stickyKnownVisible = new WeakSet();
+
+    const backupStickyProps = (node, props) => {
+        if (!stickyStyleBackup.has(node)) stickyStyleBackup.set(node, new Map());
+        const m = stickyStyleBackup.get(node);
+        props.forEach(p => {
+            if (!m.has(p)) m.set(p, [node.style.getPropertyValue(p), node.style.getPropertyPriority(p)]);
+        });
+    };
+
+    const unblockStickyAncestors = (el) => {
+        let node = el;
+        while (node && node !== document.documentElement) {
+            if (!stickyKnownVisible.has(node)) {
+                const cs = getComputedStyle(node);
+                const ox = cs.overflowX, oy = cs.overflowY;
+                if (ox === 'hidden' || oy === 'hidden') {
+                    const props = [];
+                    if (ox === 'hidden') props.push('overflow-x');
+                    if (oy === 'hidden') props.push('overflow-y');
+                    // overflow:hidden 同时会建立 BFC（清浮动/阻止外边距合并），
+                    // clip 不会，所以对普通 block 补一个 display:flow-root 保住原有排版效果
+                    if (cs.display === 'block') props.push('display');
+                    backupStickyProps(node, props);
+                    if (ox === 'hidden') node.style.setProperty('overflow-x', 'clip', 'important');
+                    if (oy === 'hidden') node.style.setProperty('overflow-y', 'clip', 'important');
+                    if (cs.display === 'block') node.style.setProperty('display', 'flow-root', 'important');
+                } else if (ox === 'visible' && oy === 'visible') {
+                    stickyKnownVisible.add(node);
+                }
+            }
+            node = node.parentElement;
+        }
+    };
+
+    const restoreStickyAncestors = () => {
+        stickyStyleBackup.forEach((props, node) => {
+            props.forEach(([value, priority], prop) => {
+                if (value) node.style.setProperty(prop, value, priority);
+                else node.style.removeProperty(prop);
+            });
+        });
+        stickyStyleBackup.clear();
+        // WeakSet 不能清空，只能换一个新的
+        stickyKnownVisible = new WeakSet();
+    };
+
     // 标题吸顶容器：把标题链接及其附属标签（勾选框 / 已浏览 / 可复制文本）收进 .custom-card-head，
     // 多列卡片被图片撑得比屏幕更高时，向下滚动标题会一直吸附在顶部
     const ensureCardHead = (tbody, link) => {
@@ -1941,6 +1994,8 @@
             if (node.classList.contains('custom-extracted')) return;
             head.appendChild(node);
         });
+        // 顺手解开会阻断 sticky 的 overflow:hidden（含 th/tr/tbody 与页面外层容器）
+        unblockStickyAncestors(head);
         return head;
     };
 
@@ -2120,6 +2175,29 @@
         observer.observe(threadListContainer, { childList: true, subtree: true });
     }
 
+    // 每张卡片的标题容器、以及表格外层的包裹层都要检查一遍
+    const applyStickyFix = (table) => {
+        if (!table) return;
+        unblockStickyAncestors(table);
+        table.querySelectorAll('.custom-card-head').forEach(h => unblockStickyAncestors(h));
+    };
+
+    // 排障用：控制台执行 __customStickyDebug() 可查看标题到根元素的 overflow 链
+    window.__customStickyDebug = () => {
+        const head = document.querySelector('.custom-card-head');
+        if (!head) return '[x] 页面上没有 .custom-card-head（多列布局是否已开启？）';
+        const rows = [];
+        let n = head;
+        while (n && n.nodeType === 1) {
+            const cs = getComputedStyle(n);
+            const cls = typeof n.className === 'string' && n.className.trim()
+                ? '.' + n.className.trim().split(/\s+/).join('.') : '';
+            rows.push(`${n.tagName.toLowerCase()}${n.id ? '#' + n.id : ''}${cls}  |  position:${cs.position}  overflow:${cs.overflowX}/${cs.overflowY}  display:${cs.display}`);
+            n = n.parentElement;
+        }
+        return rows.join('\n');
+    };
+
     // 列表页多列布局：给容器加 class 并写入列数变量
     const applyListColumns = () => {
         const table = threadListContainer;
@@ -2129,6 +2207,7 @@
         if (!STATE.listMultiColumn) {
             table.classList.remove('custom-grid-mode');
             table.style.removeProperty('--custom-cols');
+            restoreStickyAncestors();
             fixTableColumnWidths();
             return;
         }
@@ -2136,6 +2215,8 @@
         if (oldColgroup) oldColgroup.remove();
         table.style.setProperty('--custom-cols', String(cols));
         table.classList.add('custom-grid-mode');
+        // 解开阻断 sticky 的 overflow:hidden（表格本身 + 外层包裹层 + 每张卡片的标题容器）
+        applyStickyFix(table);
     };
 
     // 修复表格列宽：插入 <colgroup> 避免第一页全部隐藏时 table-layout:fixed 列宽塌缩

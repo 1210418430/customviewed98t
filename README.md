@@ -4,7 +4,7 @@
 
 ## 版本
 
-当前版本：**v15.18**
+当前版本：**v15.19**
 
 ## 安装与更新
 
@@ -114,6 +114,19 @@ README.md          — 本文件
 - Tampermonkey 扩展
 
 ## 变更日志
+
+### v15.19
+- **修复 v15.18 标题吸顶完全无效**：`position: sticky` 会被**任何** `overflow` 不为 `visible` 的祖先元素
+  截断——它会把那个祖先当成"滚动容器"，而那个容器本身从不滚动，于是标题一动不动。
+  本论坛 `div.mn`（列表主体外层）就带 `overflow: hidden`（清浮动用的），这就是吸顶失效的根因。
+  - 新增 `unblockStickyAncestors()`：从卡片标题向上遍历到 `<html>`，把 `overflow:hidden` 的祖先
+    就地改成 **`overflow: clip`**——裁剪效果和 hidden 一样，但**不会产生滚动容器**，sticky 才能相对视口生效
+  - 同时补 `display: flow-root`，把 `overflow:hidden` 顺带建立的 BFC（清浮动 / 阻止外边距合并）效果保住，
+    实测页面各区块高度、页脚位置与改动前完全一致（若改用 `overflow: visible` 会让整页位移 15px）
+  - 关闭多列布局时 `restoreStickyAncestors()` 完整还原被改过的样式
+  - 排查辅助：控制台执行 `__customStickyDebug()` 会打印标题到根元素的 overflow 链
+- 已知表现：吸顶条高度 = 该卡片标题区（标题 + 可复制文本 + 标签）的原始高度，长标题卡片可能到
+  150-220px；若觉得占屏，可调小 `--custom-sticky-top` 或告知行数以做折叠
 
 ### v15.18
 - 多列卡片新增**标题吸顶**：卡片被图片/链接撑得比屏幕还高时，向下滚动过程中标题（含勾选框、
