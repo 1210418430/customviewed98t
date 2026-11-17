@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.19
+// @version      15.20
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -387,13 +387,60 @@
         /* 卡片标题吸顶：卡片内容（图片/链接）比屏幕还高时，向下滚动标题始终可见 */
         table.custom-grid-mode .custom-card-head {
             position: sticky;
-            /* 若站点顶部有固定导航栏挡住标题，把 --custom-sticky-top 调成导航栏高度即可 */
+            /* 由脚本探测顶部固定导航栏高度后写入，避免标题被导航栏压住 */
             top: var(--custom-sticky-top, 0px);
             z-index: 6;
             background: #fff;
             padding-bottom: 4px;
+            /* 内容再多也不能把整屏占满：超出就区内滚动 */
+            max-height: 65vh;
+            overflow-y: auto;
+            overscroll-behavior: contain;
             /* 吸顶时盖住下方滚动内容，加一点极淡的分隔感 */
             box-shadow: 0 4px 8px -6px rgba(0,0,0,0.35);
+        }
+        /* 吸顶区字号加大，滚动时更易读 */
+        table.custom-grid-mode .custom-card-head a.xst,
+        table.custom-grid-mode .custom-card-head a[href*="thread-"] {
+            font-size: 16px !important;
+            line-height: 1.45 !important;
+        }
+        table.custom-grid-mode .custom-card-head .custom-title-copy {
+            font-size: 13px !important;
+            line-height: 1.5 !important;
+        }
+        table.custom-grid-mode .custom-card-head .custom-viewed-tag {
+            font-size: 12px;
+        }
+        /* 吸顶区里的操作按钮（收藏 / 链接面板）铺满卡片宽度 */
+        table.custom-grid-mode .custom-card-head > [data-custom-sticky-part] {
+            margin-left: 0 !important;
+            margin-right: 0 !important;
+            max-width: 100% !important;
+        }
+        /* 卡片变窄时按钮不能被压成竖排文字：允许换行，按钮本身不缩 */
+        table.custom-grid-mode .custom-link-btn-row {
+            flex-wrap: wrap !important;
+        }
+        table.custom-grid-mode .custom-link-btn-row > button {
+            flex: 0 0 auto !important;
+            white-space: nowrap !important;
+            padding: 4px 10px !important;
+            font-size: 12px !important;
+        }
+        table.custom-grid-mode .custom-link-row > button {
+            flex: 0 0 auto !important;
+            white-space: nowrap !important;
+        }
+        table.custom-grid-mode .custom-link-row > span {
+            min-width: 0;
+        }
+        table.custom-grid-mode .custom-link-list {
+            max-height: 110px;
+        }
+        table.custom-grid-mode .custom-card-head .custom-extracted,
+        table.custom-grid-mode .custom-card-head > div {
+            min-width: 0;
         }
         /* 高亮帖子的卡片底色是淡黄，吸顶标题要跟着变，否则会出现白色补丁 */
         table.custom-grid-mode > tbody.custom-highlight .custom-card-head {
@@ -417,7 +464,7 @@
             cursor: text;
         }
         table.custom-grid-mode .custom-title-copy {
-            font-size: 11px;
+            font-size: 13px;
             margin-top: 3px;
         }
     `);
@@ -2175,9 +2222,49 @@
         observer.observe(threadListContainer, { childList: true, subtree: true });
     }
 
+    // 探测顶部固定导航栏（#nv 等）的高度，作为吸顶偏移，避免标题被导航栏压住
+    const detectTopBarHeight = () => {
+        let h = 0;
+        ['#nv', '#hd', '.hdc', '#toptb', 'header', '.header', '.navbar'].forEach(sel => {
+            const el = document.querySelector(sel);
+            if (!el) return;
+            const cs = getComputedStyle(el);
+            if (cs.position !== 'fixed' && cs.position !== 'sticky') return;
+            const r = el.getBoundingClientRect();
+            if (r.height < 8 || r.height > 200) return;
+            if (r.top > 4 || r.bottom < 8) return;
+            h = Math.max(h, Math.round(r.bottom));
+        });
+        return h;
+    };
+
+    // 顶部导航栏的高度是"滚动后才固定"的（Discuz 皮肤常见做法），所以要跟着滚动实时更新
+    let _stickyTopBound = false;
+    const bindStickyTopWatcher = () => {
+        if (_stickyTopBound) return;
+        _stickyTopBound = true;
+        let raf = 0;
+        const update = () => {
+            raf = 0;
+            const h = detectTopBarHeight();
+            const val = (h > 0 ? h + 4 : 0) + 'px';
+            document.querySelectorAll('table.custom-grid-mode').forEach(t => {
+                if (t.style.getPropertyValue('--custom-sticky-top') !== val) {
+                    t.style.setProperty('--custom-sticky-top', val);
+                }
+            });
+        };
+        window.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(update); }, { passive: true });
+        window.addEventListener('resize', update);
+    };
+
     // 每张卡片的标题容器、以及表格外层的包裹层都要检查一遍
     const applyStickyFix = (table) => {
         if (!table) return;
+        // 吸顶偏移 = 顶部固定导航栏高度 + 4px 间隙
+        const navH = detectTopBarHeight();
+        table.style.setProperty('--custom-sticky-top', (navH > 0 ? navH + 4 : 0) + 'px');
+        bindStickyTopWatcher();
         unblockStickyAncestors(table);
         table.querySelectorAll('.custom-card-head').forEach(h => unblockStickyAncestors(h));
     };
@@ -3951,6 +4038,16 @@
         const data = await fetchThreadData(threadUrl);
         if (!data) { restoreOldBox(); return; }
 
+        // 吸顶区（标题容器）：收藏按钮、链接操作面板都挂到这里，滚动时跟着标题一起钉在顶部。
+        // 仅多列布局下启用；单列（原始表格）保持原样，避免按钮跑到图片上方
+        const _inGrid = !!(tbody.closest('table') && tbody.closest('table').classList.contains('custom-grid-mode'));
+        const stickyHost = _inGrid ? tbody.querySelector('.custom-card-head') : null;
+        if (stickyHost) {
+            // 刷新时清掉上一轮的吸顶附属块，避免重复堆积
+            stickyHost.querySelectorAll('[data-custom-sticky-part]').forEach(n => n.remove());
+        }
+        const stickyMount = stickyHost || null;
+
         const box = document.createElement('div');
         box.className = 'custom-extracted';
         box.style.cssText = 'margin-top:10px; padding-left:25px; display:flex; flex-direction:column; gap:8px; max-width:100%; overflow:hidden; box-sizing:border-box;';
@@ -4181,31 +4278,27 @@
 
         // ---- 收藏按钮（列表页提取区，位于图片下方、链接上方） ----
         (() => {
-            const _bmTid = (threadUrl.match(/tid=(\d+)/) || [])[1];
+            // 兼容两种链接形态：forum.php?mod=viewthread&tid=123 与伪静态 /thread-123-1-1.html
+            const _bmTid = (threadUrl.match(/tid=(\d+)/) || threadUrl.match(/thread-(\d+)-/) || [])[1];
             if (_bmTid) {
                 const _bmTitle = (() => {
                     const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
                     return link ? link.innerText.trim() : threadUrl;
                 })();
                 const bmRow = document.createElement('div');
-                const isCircle = STATE.buttonStyle === 'circle';
-                bmRow.style.cssText = isCircle
-                    ? 'display:flex; gap:18px; margin-top:12px; max-width:100%; justify-content:center; padding:6px 0;'
-                    : 'display:flex; gap:6px; margin-top:8px; max-width:100%; min-width:0;';
-                const _mkBmBtn = (type, label, bgColor, icon) => {
+                // 列表页吸顶区里的按钮一律用扁平小方块：竖排大圆球太占位置
+                const isCircle = false;
+                bmRow.dataset.customStickyPart = 'bm';
+                bmRow.style.cssText = 'display:flex; gap:6px; margin:6px 0 2px; max-width:100%; min-width:0; flex-wrap:nowrap;';
+                const _mkBmBtn = (type, label, shortLabel, bgColor, icon) => {
                     const _curType = getBookmarkType(_bmTid);
                     const btn = document.createElement('button');
                     btn.type = 'button';
-                    if (isCircle) {
-                        btn.innerHTML = `<span style="font-size:28px; line-height:1;">${icon}</span>`;
-                        btn.title = label;
-                        btn.style.cssText = `width:80px; height:80px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:50%; font-weight:bold; opacity:${_curType === type ? '1' : '0.45'}; transition:all 0.15s; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 4px 14px rgba(0,0,0,0.25);`;
-                    } else {
-                        btn.innerText = label;
-                        btn.style.cssText = `flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.55'}; transition:opacity 0.15s; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;`;
-                    }
-                    btn.onmouseover = () => { btn.style.opacity = '1'; btn.style.transform = isCircle ? 'scale(1.1)' : ''; };
-                    btn.onmouseout = () => { if (getBookmarkType(_bmTid) !== type) btn.style.opacity = isCircle ? '0.45' : '0.55'; btn.style.transform = ''; };
+                    btn.innerHTML = `<span style="font-size:12px;">${icon}</span> ${shortLabel}`;
+                    btn.title = label;
+                    btn.style.cssText = `flex:1; padding:5px 6px; font-size:12px; cursor:pointer; background:${bgColor}; color:#fff; border:none; border-radius:4px; font-weight:bold; opacity:${_curType === type ? '1' : '0.5'}; transition:opacity 0.15s; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; line-height:1.4;`;
+                    btn.onmouseover = () => { btn.style.opacity = '1'; };
+                    btn.onmouseout = () => { if (getBookmarkType(_bmTid) !== type) btn.style.opacity = '0.5'; };
                     btn.onclick = (ev) => {
                         ev.preventDefault(); ev.stopPropagation();
                         if (isBookmarked(_bmTid) && getBookmarkType(_bmTid) === type) {
@@ -4213,14 +4306,14 @@
                             showToast('已取消收藏', 'info');
                             bmRow.querySelectorAll('button').forEach(b => {
                                 const bmType = b.dataset.bmType;
-                                if (bmType) b.style.opacity = isCircle ? '0.45' : '0.55';
+                                if (bmType) b.style.opacity = '0.5';
                             });
                         } else {
                             const result = addBookmark(_bmTid, _bmTitle, threadUrl, type);
                             showToast(result === 'updated' ? `已更新收藏为${type === 'important' ? '重要' : '一般'}` : `已收藏为${type === 'important' ? '重要⭐' : '一般📌'}`, 'success');
                             bmRow.querySelectorAll('button').forEach(b => {
                                 const bmType = b.dataset.bmType;
-                                if (bmType) b.style.opacity = bmType === type ? '1' : (isCircle ? '0.45' : '0.55');
+                                if (bmType) b.style.opacity = bmType === type ? '1' : '0.5';
                             });
                         }
                         updateListBmBtns();
@@ -4228,20 +4321,13 @@
                     btn.dataset.bmType = type;
                     return btn;
                 };
-                bmRow.appendChild(_mkBmBtn('important', '收藏为重要帖子', '#dc3545', '⭐'));
-                bmRow.appendChild(_mkBmBtn('normal', '收藏为一般帖子', '#007bff', '📌'));
+                bmRow.appendChild(_mkBmBtn('important', '收藏为重要帖子', '重要', '#dc3545', '⭐'));
+                bmRow.appendChild(_mkBmBtn('normal', '收藏为一般帖子', '一般', '#007bff', '📌'));
                 const openThreadBtn = document.createElement('button');
                 openThreadBtn.type = 'button';
-                if (isCircle) {
-                    openThreadBtn.innerHTML = '<span style="font-size:28px; line-height:1;">📂</span>';
-                    openThreadBtn.title = '打开帖子';
-                    openThreadBtn.style.cssText = 'width:80px; height:80px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:50%; font-weight:bold; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 4px 14px rgba(0,0,0,0.25); transition:transform 0.15s;';
-                    openThreadBtn.onmouseover = () => { openThreadBtn.style.transform = 'scale(1.1)'; };
-                    openThreadBtn.onmouseout = () => { openThreadBtn.style.transform = ''; };
-                } else {
-                    openThreadBtn.innerText = '📂 打开帖子';
-                    openThreadBtn.style.cssText = 'flex:1; padding:12px 10px; font-size:14px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:normal; word-break:keep-all; overflow:hidden; text-overflow:ellipsis; min-width:0;';
-                }
+                openThreadBtn.innerHTML = '<span style="font-size:12px;">📂</span> 打开';
+                openThreadBtn.title = '打开帖子';
+                openThreadBtn.style.cssText = 'flex:1; padding:5px 6px; font-size:12px; cursor:pointer; background:#28a745; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; line-height:1.4;';
                 openThreadBtn.onclick = (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
                     GM_openInTab(threadUrl, { active: false, insert: true });
@@ -4255,7 +4341,7 @@
                     setTimeout(() => { toast.remove(); }, 2500);
                 };
                 bmRow.appendChild(openThreadBtn);
-                box.appendChild(bmRow);
+                (stickyMount || box).appendChild(bmRow);
             }
         })();
 
@@ -4326,8 +4412,10 @@
             if (everyLink.length > 0) {
                 const linkContent = everyLink.join('\n');
                 const linkWrap = document.createElement('div');
+                linkWrap.dataset.customStickyPart = 'links';
                 linkWrap.style.cssText = 'border:1px solid #dee2e6; border-radius:4px; padding:8px; background:#fdfdfd;';
                 const linkHeader = document.createElement('div');
+                linkHeader.className = 'custom-link-header';
                 linkHeader.style.cssText = 'display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; flex-wrap:wrap; gap:4px;';
                 const linkInfo = document.createElement('span');
                 linkInfo.style.cssText = 'font-size:12px; font-weight:bold; color:#495057;';
@@ -4335,7 +4423,8 @@
                 linkHeader.appendChild(linkInfo);
 
                 const linkBtnRow = document.createElement('div');
-                linkBtnRow.style.cssText = 'display:flex; gap:4px;';
+                linkBtnRow.className = 'custom-link-btn-row';
+                linkBtnRow.style.cssText = 'display:flex; gap:4px; flex-wrap:wrap;';
 
                 const linkCopyBtn = document.createElement('button');
                 linkCopyBtn.type = 'button'; linkCopyBtn.innerText = '复制全部';
@@ -4373,9 +4462,13 @@
 
                 // 逐行链接 + 每行推送按钮
                 const linkListDiv = document.createElement('div');
-                linkListDiv.style.cssText = 'max-height:200px; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:3px;';
+                linkListDiv.className = 'custom-link-list';
+                // 多列卡片里链接面板是吸顶的一部分，列表高度压小一点，避免吸顶区过高
+                const linkListMax = _inGrid ? '110px' : '200px';
+                linkListDiv.style.cssText = `max-height:${linkListMax}; overflow-y:auto; background:#f8f9fa; padding:8px; border-radius:3px;`;
                 everyLink.forEach(link => {
                     const lineDiv = document.createElement('div');
+                    lineDiv.className = 'custom-link-row';
                     lineDiv.style.cssText = 'display:flex; align-items:center; gap:4px; padding:2px 0; border-bottom:1px solid #eee;';
                     const linkText = document.createElement('span');
                     linkText.style.cssText = 'flex:1; font-size:11px; word-break:break-all; font-family:monospace;';
@@ -4406,10 +4499,11 @@
                     const linkToggle = document.createElement('button');
                     linkToggle.type = 'button'; linkToggle.innerText = '展开全文';
                     linkToggle.style.cssText = 'font-size:12px; margin-top:4px; cursor:pointer; padding:4px 12px; background:#e9ecef; border:1px solid #ccc; border-radius:3px; font-weight:bold;';
-                    linkToggle.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (linkListDiv.style.maxHeight === '200px') { linkListDiv.style.maxHeight = 'none'; linkToggle.innerText = '收起'; } else { linkListDiv.style.maxHeight = '200px'; linkToggle.innerText = '展开全文'; } };
+                    linkToggle.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); if (linkListDiv.style.maxHeight === linkListMax) { linkListDiv.style.maxHeight = 'none'; linkToggle.innerText = '收起'; } else { linkListDiv.style.maxHeight = linkListMax; linkToggle.innerText = '展开全文'; } };
                     linkWrap.appendChild(linkToggle);
                 }
-                resWrap.appendChild(linkWrap);
+                // 链接面板挂到吸顶区（跟着标题一起钉住），没有吸顶容器时退回原位置
+                (stickyMount || resWrap).appendChild(linkWrap);
             }
 
             // TXT 内容合并文本框
@@ -4446,7 +4540,8 @@
                 }
                 resWrap.appendChild(txtWrap);
             }
-            box.appendChild(resWrap);
+            // 链接面板已被搬到吸顶区，resWrap 可能空了
+            if (resWrap.children.length > 0) box.appendChild(resWrap);
         }
 
         // 用 rAF 批量插入 DOM，减少画面抖动（刷新时原地替换旧内容，不产生高度塌陷）
@@ -5761,16 +5856,15 @@
 
     // 更新列表页收藏按钮状态（删除/添加收藏后刷新星标透明度）
     const updateListBmBtns = () => {
-        const isCircle = STATE.buttonStyle === 'circle';
-        const inactiveOpacity = isCircle ? '0.45' : '0.55';
+        const inactiveOpacity = '0.5';
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
             const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
             if (!link) return;
             const tid = (link.href.match(/tid=(\d+)/) || [])[1];
             if (!tid) return;
             const curType = getBookmarkType(tid);
-            // 提取区内的收藏按钮
-            tbody.querySelectorAll('.custom-extracted button[data-bm-type]').forEach(btn => {
+            // 收藏按钮可能挂在吸顶区（.custom-card-head）里，也可能在提取区
+            tbody.querySelectorAll('button[data-bm-type]').forEach(btn => {
                 btn.style.opacity = btn.dataset.bmType === curType ? '1' : inactiveOpacity;
             });
         });
