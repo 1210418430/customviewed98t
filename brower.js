@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.21
+// @version      15.22
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -431,6 +431,47 @@
         }
         table.custom-grid-mode .custom-fs-btn { display: inline-block; }
         .custom-fs-btn:hover { background: #e9ecef; border-color: #adb5bd; }
+        /* 购买主题提示条（.locked），跟着标题一起吸顶 */
+        .custom-buy-bar {
+            display: flex;
+            align-items: center;
+            gap: 4px 6px;
+            flex-wrap: wrap;
+            margin: 4px 0 2px;
+            padding: 4px 6px;
+            background: #fff8e1;
+            border: 1px solid #ffc107;
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.4;
+            color: #856404;
+        }
+        .custom-buy-bar .custom-buy-info {
+            flex: 1 1 auto;
+            min-width: 0;
+            font-weight: bold;
+            word-break: break-word;
+        }
+        .custom-buy-bar .custom-buy-btns {
+            display: flex;
+            gap: 4px;
+            flex: 0 0 auto;
+        }
+        .custom-buy-bar button {
+            flex: 0 0 auto;
+            padding: 3px 9px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #fff;
+            background: #e67e22;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            white-space: nowrap;
+            line-height: 1.35;
+        }
+        .custom-buy-bar button.custom-buy-record { background: #6c757d; }
+        .custom-buy-bar button:hover { opacity: 0.88; }
         table.custom-grid-mode .custom-card-head .custom-viewed-tag {
             font-size: 12px;
         }
@@ -697,13 +738,24 @@
                     }
                 });
 
-                // 检测隐藏内容（需回复可见）
+                // 检测隐藏内容（需回复可见 / 需购买主题）
                 const lockedDiv = firstPost.querySelector('.locked');
                 if (lockedDiv) {
                     const replyLink = lockedDiv.querySelector('a[href*="action=reply"]');
+                    const payLink = lockedDiv.querySelector('a[href*="action=pay"]');
+                    const recLink = lockedDiv.querySelector('a[href*="action=viewpayments"]');
+                    const priceEl = lockedDiv.querySelector('strong');
+                    const buyersEl = lockedDiv.querySelector('em.right') || lockedDiv.querySelector('em');
                     data.locked = {
                         message: lockedDiv.innerText.trim(),
-                        replyUrl: replyLink ? toAbs(replyLink.getAttribute('href')) : null
+                        replyUrl: replyLink ? toAbs(replyLink.getAttribute('href')) : null,
+                        // 购买主题类锁定：价格、已购人数、两个操作链接
+                        isPay: !!payLink,
+                        payUrl: payLink ? toAbs(payLink.getAttribute('href')) : null,
+                        recordUrl: recLink ? toAbs(recLink.getAttribute('href')) : null,
+                        price: priceEl ? priceEl.innerText.replace(/\s+/g, ' ').trim() : '',
+                        buyers: buyersEl ? buyersEl.innerText.replace(/\s+/g, ' ').trim() : '',
+                        fullText: (lockedDiv.innerText || '').replace(/\s+/g, ' ').trim()
                     };
                 }
             }
@@ -4133,8 +4185,53 @@
             box.appendChild(imgWrap);
         }
 
+        // ---- 购买主题提示条（.locked 里的"购买主题/记录/已有 N 人购买"），跟着标题一起吸顶 ----
+        if (data.locked && data.locked.isPay) {
+            const buyBar = document.createElement('div');
+            buyBar.className = 'custom-buy-bar';
+            buyBar.dataset.customStickyPart = 'buy';
+
+            const info = document.createElement('span');
+            info.className = 'custom-buy-info';
+            const priceTxt = data.locked.price || '';
+            const buyersNum = (String(data.locked.buyers || '').match(/\d+/) || [])[0] || '';
+            // 尽量短：卡片窄时少换行（完整文案放在 title 里）
+            info.innerText = '🔒 需付 ' + (priceTxt || '金币') + ' 才能浏览'
+                + (buyersNum ? ' · 已购 ' + buyersNum + ' 人' : '');
+            info.title = data.locked.fullText || info.innerText;
+            buyBar.appendChild(info);
+
+            const btns = document.createElement('div');
+            btns.className = 'custom-buy-btns';
+            const openPayWindow = (url) => {
+                if (!url) return;
+                if (typeof showWindow === 'function') {
+                    try { showWindow('pay', url); return; } catch (err) {}
+                }
+                GM_openInTab(url, { active: true, insert: true });
+            };
+            if (data.locked.payUrl) {
+                const btnBuy = document.createElement('button');
+                btnBuy.type = 'button';
+                btnBuy.innerText = '💰 购买主题';
+                btnBuy.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); openPayWindow(data.locked.payUrl); };
+                btns.appendChild(btnBuy);
+            }
+            if (data.locked.recordUrl) {
+                const btnRec = document.createElement('button');
+                btnRec.type = 'button';
+                btnRec.className = 'custom-buy-record';
+                btnRec.innerText = '📋 记录';
+                btnRec.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); openPayWindow(data.locked.recordUrl); };
+                btns.appendChild(btnRec);
+            }
+            if (btns.children.length) buyBar.appendChild(btns);
+            (stickyMount || box).appendChild(buyBar);
+        }
+
         // ---- 隐藏内容（需回复可见） ----
-        if (data.locked) {
+        // 纯购买类锁定已经由上面的提示条展示，没回复链接就不再重复渲染文字块
+        if (data.locked && !(data.locked.isPay && !data.locked.replyUrl)) {
             const lockedWrap = document.createElement('div');
             lockedWrap.style.cssText = 'margin-top:6px; border:1px solid #ffc107; border-radius:4px; padding:10px; background:#fffdf5;';
 
