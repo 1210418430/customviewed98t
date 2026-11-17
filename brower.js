@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.20
+// @version      15.21
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -46,6 +46,7 @@
         listMultiColumn: GM_getValue('custom_list_multi_column', true), // 列表多列开关
         listColumns: GM_getValue('custom_list_columns', 3), // 列表页多列显示的列数 2~5
         titleCopyEnabled: GM_getValue('custom_title_copy', true), // 标题下方复制一份纯文本
+        stickyTitleFont: GM_getValue('custom_sticky_title_font', 18), // 吸顶区标题字号 px
         buttonStyle: GM_getValue('custom_button_style', 'rect'), // 'rect' | 'circle' 收藏/打开按钮样式
         scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
         scrollJumpAmount: GM_getValue('custom_scroll_jump_amount', '2/3'), // '1' | '2/3' | '1/2' 快捷跳转量
@@ -106,6 +107,8 @@
     if (!Array.isArray(STATE.hiddenTids)) STATE.hiddenTids = [];
     if (!Array.isArray(STATE.bookmarks)) STATE.bookmarks = [];
     STATE.listColumns = Math.max(2, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
+    // 吸顶区标题字号范围 14~30px
+    STATE.stickyTitleFont = Math.max(14, Math.min(30, parseInt(STATE.stickyTitleFont, 10) || 18));
     STATE.tempUnhiddenSet = new Set(); // 会话级临时解除隐藏，刷新后恢复
 
     // ================= 书签操作 =================
@@ -399,16 +402,35 @@
             /* 吸顶时盖住下方滚动内容，加一点极淡的分隔感 */
             box-shadow: 0 4px 8px -6px rgba(0,0,0,0.35);
         }
-        /* 吸顶区字号加大，滚动时更易读 */
+        /* 吸顶区字号由设置里的「标题字号」控制（--custom-title-fs），默认 18px */
         table.custom-grid-mode .custom-card-head a.xst,
         table.custom-grid-mode .custom-card-head a[href*="thread-"] {
-            font-size: 16px !important;
+            font-size: var(--custom-title-fs, 18px) !important;
             line-height: 1.45 !important;
         }
         table.custom-grid-mode .custom-card-head .custom-title-copy {
-            font-size: 13px !important;
+            font-size: calc(var(--custom-title-fs, 18px) - 5px) !important;
             line-height: 1.5 !important;
         }
+        /* 标题后面的字号调节按钮（仅多列模式显示，单列下改了也看不出效果） */
+        .custom-fs-btn {
+            display: none;
+            margin-left: 6px;
+            padding: 1px 6px;
+            font-size: 11px;
+            line-height: 1.5;
+            font-weight: bold;
+            color: #495057;
+            background: #fff;
+            border: 1px solid #ced4da;
+            border-radius: 3px;
+            cursor: pointer;
+            vertical-align: middle;
+            user-select: none;
+            white-space: nowrap;
+        }
+        table.custom-grid-mode .custom-fs-btn { display: inline-block; }
+        .custom-fs-btn:hover { background: #e9ecef; border-color: #adb5bd; }
         table.custom-grid-mode .custom-card-head .custom-viewed-tag {
             font-size: 12px;
         }
@@ -464,7 +486,7 @@
             cursor: text;
         }
         table.custom-grid-mode .custom-title-copy {
-            font-size: 13px;
+            font-size: calc(var(--custom-title-fs, 18px) - 5px);
             margin-top: 3px;
         }
     `);
@@ -2024,6 +2046,36 @@
         stickyKnownVisible = new WeakSet();
     };
 
+    // ============ 吸顶区标题字号 ============
+    // 通过 CSS 变量控制，改一次全站卡片生效；用户点标题后面的「字18」按钮循环切换
+    const TITLE_FONT_STEPS = [16, 18, 20, 22, 24, 28];
+    const applyStickyTitleFont = () => {
+        document.documentElement.style.setProperty('--custom-title-fs', STATE.stickyTitleFont + 'px');
+    };
+    const setStickyTitleFont = (px) => {
+        STATE.stickyTitleFont = Math.max(14, Math.min(30, px));
+        saveState('custom_sticky_title_font', STATE.stickyTitleFont);
+        applyStickyTitleFont();
+        document.querySelectorAll('.custom-fs-btn').forEach(b => { b.innerText = '字' + STATE.stickyTitleFont; });
+    };
+    const makeFontBtn = () => {
+        const btn = document.createElement('span');
+        btn.className = 'custom-fs-btn';
+        btn.innerText = '字' + STATE.stickyTitleFont;
+        btn.title = '点击切换标题字号（当前 ' + STATE.stickyTitleFont + 'px）';
+        btn.onclick = (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            // 找到当前字号在循环档位里的下一个（自定义值则回到第一档）
+            const idx = TITLE_FONT_STEPS.indexOf(STATE.stickyTitleFont);
+            const next = TITLE_FONT_STEPS[(idx + 1) % TITLE_FONT_STEPS.length];
+            setStickyTitleFont(next);
+            btn.title = '点击切换标题字号（当前 ' + next + 'px）';
+            showToast('标题字号：' + next + 'px', 'info');
+        };
+        return btn;
+    };
+    applyStickyTitleFont();
+
     // 标题吸顶容器：把标题链接及其附属标签（勾选框 / 已浏览 / 可复制文本）收进 .custom-card-head，
     // 多列卡片被图片撑得比屏幕更高时，向下滚动标题会一直吸附在顶部
     const ensureCardHead = (tbody, link) => {
@@ -2041,6 +2093,9 @@
             if (node.classList.contains('custom-extracted')) return;
             head.appendChild(node);
         });
+        // 标题后面挂一个字号调节按钮
+        if (link.parentNode === head) link.insertAdjacentElement('afterend', makeFontBtn());
+        else head.appendChild(makeFontBtn());
         // 顺手解开会阻断 sticky 的 overflow:hidden（含 th/tr/tbody 与页面外层容器）
         unblockStickyAncestors(head);
         return head;
