@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.22
+// @version      15.23
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -746,8 +746,13 @@
                     const recLink = lockedDiv.querySelector('a[href*="action=viewpayments"]');
                     const priceEl = lockedDiv.querySelector('strong');
                     const buyersEl = lockedDiv.querySelector('em.right') || lockedDiv.querySelector('em');
+                    // 纯文字提示：去掉里面的链接/按钮（“回复”“购买主题”这些字样），
+                    // 操作已经由下面的提示条与按钮承担
+                    const _msgClone = lockedDiv.cloneNode(true);
+                    _msgClone.querySelectorAll('a, button, em.right').forEach(n => n.remove());
+                    const _msgText = (_msgClone.innerText || _msgClone.textContent || '').replace(/\s+/g, ' ').trim();
                     data.locked = {
-                        message: lockedDiv.innerText.trim(),
+                        message: _msgText || lockedDiv.innerText.trim(),
                         replyUrl: replyLink ? toAbs(replyLink.getAttribute('href')) : null,
                         // 购买主题类锁定：价格、已购人数、两个操作链接
                         isPay: !!payLink,
@@ -4240,14 +4245,26 @@
             lockedMsg.innerText = '🔒 ' + data.locked.message;
             lockedWrap.appendChild(lockedMsg);
 
+            // 吸顶模式下这一整排回复按钮跟着标题一起钉住，边滚边回复
             const btnRow = document.createElement('div');
-            btnRow.style.cssText = 'display:flex; gap:8px;';
+            if (stickyMount) {
+                btnRow.dataset.customStickyPart = 'reply';
+                btnRow.style.cssText = 'display:flex; gap:4px; flex-wrap:wrap; margin:6px 0 2px; max-width:100%; min-width:0;';
+            } else {
+                btnRow.style.cssText = 'display:flex; gap:8px;';
+            }
+            // 吸顶区卡片很窄，长按钮会被压成竖排文字，所以换成短标签 + title 兜底
+            const _replyBtnStyle = (color) => stickyMount
+                ? `flex:1 1 auto; min-width:0; padding:4px 6px; font-size:12px; line-height:1.4; cursor:pointer; background:${color}; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;`
+                : `font-size:12px; cursor:pointer; padding:5px 12px; background:${color}; color:#fff; border:none; border-radius:3px; font-weight:bold;`;
+            const _replyLabel = (full, short) => stickyMount ? short : full;
 
             if (data.locked.replyUrl) {
                 const btnReply = document.createElement('button');
                 btnReply.type = 'button';
-                btnReply.innerText = '💬 新窗口回复';
-                btnReply.style.cssText = 'font-size:12px; cursor:pointer; padding:5px 12px; background:#28a745; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                btnReply.innerText = _replyLabel('💬 新窗口回复', '💬 新窗口');
+                btnReply.title = '新窗口回复';
+                btnReply.style.cssText = _replyBtnStyle('#28a745');
                 btnReply.onclick = (e) => {
                     e.preventDefault(); e.stopPropagation();
                     GM_openInTab(data.locked.replyUrl, { active: true, insert: true });
@@ -4257,8 +4274,9 @@
                 // 快速回复（论坛内置弹窗）
                 const btnQuickReply = document.createElement('button');
                 btnQuickReply.type = 'button';
-                btnQuickReply.innerText = '⚡ 快速回复';
-                btnQuickReply.style.cssText = 'font-size:12px; cursor:pointer; padding:5px 12px; background:#17a2b8; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                btnQuickReply.innerText = _replyLabel('⚡ 快速回复', '⚡ 快速');
+                btnQuickReply.title = '快速回复（论坛弹窗，手动提交）';
+                btnQuickReply.style.cssText = _replyBtnStyle('#17a2b8');
                 btnQuickReply.onclick = (e) => {
                     e.preventDefault(); e.stopPropagation();
                     if (typeof showWindow === 'function') {
@@ -4328,12 +4346,14 @@
                 // 一键快速回复（固定文本自动发送）
                 const btnAutoReply = document.createElement('button');
                 btnAutoReply.type = 'button';
-                btnAutoReply.innerText = '🚀 一键回复';
-                btnAutoReply.style.cssText = 'font-size:12px; cursor:pointer; padding:5px 12px; background:#e67e22; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+                const _autoLabel = _replyLabel('🚀 一键回复', '🚀 一键');
+                btnAutoReply.innerText = _autoLabel;
+                btnAutoReply.title = '一键回复：自动填入固定文本并提交';
+                btnAutoReply.style.cssText = _replyBtnStyle('#e67e22');
                 btnAutoReply.onclick = (e) => {
                     e.preventDefault(); e.stopPropagation();
                     const replyText = STATE.quickReplyText || '谢谢楼主分享';
-                    btnAutoReply.innerText = '发送中...';
+                    btnAutoReply.innerText = stickyMount ? '发送中' : '发送中...';
                     btnAutoReply.disabled = true;
 
                     if (typeof showWindow === 'function') {
@@ -4357,7 +4377,7 @@
                                 try { hideWindow('reply'); } catch(err) {}
                                 showToast('✅ 一键回复成功', 'success');
                                 btnRefresh.click();
-                                btnAutoReply.innerText = '🚀 一键回复';
+                                btnAutoReply.innerText = _autoLabel;
                                 btnAutoReply.disabled = false;
                             };
 
@@ -4378,7 +4398,7 @@
                                 } catch (err) {
                                     showToast('❌ 回复失败: ' + err.message, 'error');
                                 }
-                                btnAutoReply.innerText = '🚀 一键回复';
+                                btnAutoReply.innerText = _autoLabel;
                                 btnAutoReply.disabled = false;
                                 return false;
                             }, true);
@@ -4393,7 +4413,7 @@
                         setTimeout(interceptAutoReply, 600);
                     } else {
                         GM_openInTab(data.locked.replyUrl, { active: true, insert: true });
-                        btnAutoReply.innerText = '🚀 一键回复';
+                        btnAutoReply.innerText = _autoLabel;
                         btnAutoReply.disabled = false;
                     }
                 };
@@ -4402,12 +4422,14 @@
 
             const btnRefresh = document.createElement('button');
             btnRefresh.type = 'button';
-            btnRefresh.innerText = '🔄 已回复，刷新查看';
-            btnRefresh.style.cssText = 'font-size:12px; cursor:pointer; padding:5px 12px; background:#007bff; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+            const _refreshLabel = _replyLabel('🔄 已回复，刷新查看', '🔄 刷新');
+            btnRefresh.innerText = _refreshLabel;
+            btnRefresh.title = '已回复，刷新查看';
+            btnRefresh.style.cssText = _replyBtnStyle('#007bff');
             btnRefresh.onclick = async (e) => {
                 e.preventDefault(); e.stopPropagation();
                 if (btnRefresh.disabled) return;
-                btnRefresh.innerText = '正在刷新...';
+                btnRefresh.innerText = stickyMount ? '刷新中' : '正在刷新...';
                 btnRefresh.disabled = true;
                 try {
                     // 清除缓存
@@ -4419,12 +4441,13 @@
                 } catch (err) {
                     showToast('❌ 刷新失败: ' + err.message, 'error');
                 } finally {
-                    btnRefresh.innerText = '🔄 已回复，刷新查看';
+                    btnRefresh.innerText = _refreshLabel;
                     btnRefresh.disabled = false;
                 }
             };
             btnRow.appendChild(btnRefresh);
-            lockedWrap.appendChild(btnRow);
+            // 多列模式下整排回复按钮搬进吸顶区，正文只留提示文字
+            (stickyMount || lockedWrap).appendChild(btnRow);
             box.appendChild(lockedWrap);
         }
 
