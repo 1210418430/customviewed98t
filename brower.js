@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.28
+// @version      15.29
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -60,6 +60,7 @@
         concurrentDelay: GM_getValue('custom_concurrent_delay', 600),
         attachLimit: GM_getValue('custom_attach_limit', 12), // 单帖最多读取多少个附件（种子/TXT/压缩包）
         netDebug: GM_getValue('custom_net_debug', false), // 打印每个网络请求（排障用，默认关）
+        searchShowImage: GM_getValue('custom_search_show_image', false), // 搜索页卡片显示封面图（默认关，太占地方）
         offline115Cid: GM_getValue('offline_115_cid', '0'),
         offline115CidName: GM_getValue('offline_115_cid_name', '根目录'),
         offline115AutoOpen: GM_getValue('offline_115_auto_open', false),
@@ -2779,7 +2780,8 @@
         box.innerHTML = '';
 
         // ---- 图片 ----
-        if (data.images.length > 0) {
+        // 搜索结果是列表性质，封面图放在窄卡片里又大又占地方，默认不显示（设置里「🖼 搜索页显示图片」可开）
+        if (STATE.searchShowImage && data.images.length > 0) {
             const imgWrap = document.createElement('div');
             if (STATE.imageDisplayMode === 'scroll') {
                 imgWrap.style.cssText = 'overflow-x:auto; white-space:nowrap; padding:4px 0;';
@@ -2901,7 +2903,7 @@
         }
 
         if (!box.children.length) {
-            box.innerHTML = '<div style="font-size:12px;color:#999;">这个帖子里没有可提取的图片或下载链接</div>';
+            box.innerHTML = `<div style="font-size:12px;color:#999;">这个帖子里没有可提取的${STATE.searchShowImage ? '图片或' : ''}下载链接</div>`;
         }
         cb.disabled = false;
     };
@@ -3792,6 +3794,25 @@
     netDebugRow.appendChild(netDebugLabel);
     netDebugRow.appendChild(netDebugSwitch);
     settingsPanel.appendChild(netDebugRow);
+
+    // 搜索页显示封面图（默认关：搜索结果是列表性质，图放在窄卡片里又大又占地方）
+    const searchImgRow = document.createElement('div');
+    searchImgRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const searchImgLabel = document.createElement('span');
+    searchImgLabel.innerText = '🖼 搜索页显示图片';
+    searchImgLabel.title = '搜索结果卡片里是否显示帖子封面图。关闭后只提取链接，卡片更紧凑（默认关闭）。';
+    searchImgLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333; cursor: help;';
+    const searchImgSwitch = document.createElement('input');
+    searchImgSwitch.type = 'checkbox';
+    searchImgSwitch.checked = STATE.searchShowImage;
+    searchImgSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    searchImgSwitch.onchange = (e) => {
+        STATE.searchShowImage = e.target.checked;
+        saveState('custom_search_show_image', e.target.checked);
+    };
+    searchImgRow.appendChild(searchImgLabel);
+    searchImgRow.appendChild(searchImgSwitch);
+    settingsPanel.appendChild(searchImgRow);
 
     // 115 离线下载相关设置
     const offline115AutoRow = document.createElement('div');
@@ -6059,6 +6080,7 @@
             concurrentEnabled: 'custom_concurrent_enabled', concurrentCount: 'custom_concurrent_count',
             concurrentDelay: 'custom_concurrent_delay',
             attachLimit: 'custom_attach_limit', netDebug: 'custom_net_debug',
+            searchShowImage: 'custom_search_show_image',
             offline115Cid: 'offline_115_cid', offline115CidName: 'offline_115_cid_name',
             offline115AutoOpen: 'offline_115_auto_open', offline115Favorites: 'offline_115_favorites',
             offline115FavMax: 'offline_115_fav_max', lightboxCenterRatio: 'custom_lightbox_center',
