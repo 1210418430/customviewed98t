@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.24
+// @version      15.25
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -46,6 +46,7 @@
         listMultiColumn: GM_getValue('custom_list_multi_column', true), // 列表多列开关
         listColumns: GM_getValue('custom_list_columns', 3), // 列表页多列显示的列数 2~5
         titleCopyEnabled: GM_getValue('custom_title_copy', true), // 标题下方复制一份纯文本
+        stickyHeadEnabled: GM_getValue('custom_sticky_head', true), // 多列下标题吸顶（卡顿时可关）
         stickyTitleFont: GM_getValue('custom_sticky_title_font', 18), // 吸顶区标题字号 px
         buttonStyle: GM_getValue('custom_button_style', 'rect'), // 'rect' | 'circle' 收藏/打开按钮样式
         scrollBallEnabled: GM_getValue('custom_scroll_ball_enabled', true),
@@ -143,6 +144,21 @@
     };
 
     const saveState = (key, value) => { GM_setValue(key, value); };
+
+    // ---- 卡顿自检：主线程单个任务超过 300ms 时在控制台留一条记录 ----
+    // 用户反馈"点不动、只渲染一半"时，把 F12 控制台里的 [卡顿自检] 行发我就能定位
+    try {
+        if (window.PerformanceObserver) {
+            new PerformanceObserver((list) => {
+                list.getEntries().forEach(en => {
+                    if (en.duration >= 300) {
+                        console.warn('[卡顿自检] 主线程被占用 ' + Math.round(en.duration) + 'ms（' +
+                            Math.round(en.startTime) + 'ms 时刻）。若此时正好卡住，请截图这行。');
+                    }
+                });
+            }).observe({ entryTypes: ['longtask'] });
+        }
+    } catch (e) {}
 
     // 自动清理过期记录 + 构建 Set 加速查找
     const HIDDEN_TID_SET = new Set();
@@ -389,8 +405,7 @@
         }
         /* 卡片标题吸顶：卡片内容（图片/链接）比屏幕还高时，向下滚动标题始终可见 */
         table.custom-grid-mode .custom-card-head {
-            position: sticky;
-            /* 由脚本探测顶部固定导航栏高度后写入，避免标题被导航栏压住 */
+            position: sticky;            /* 由脚本探测顶部固定导航栏高度后写入，避免标题被导航栏压住 */
             top: var(--custom-sticky-top, 0px);
             z-index: 6;
             background: #fff;
@@ -401,6 +416,13 @@
             overscroll-behavior: contain;
             /* 吸顶时盖住下方滚动内容，加一点极淡的分隔感 */
             box-shadow: 0 4px 8px -6px rgba(0,0,0,0.35);
+        }
+        /* 关掉吸顶（设置里可关）：不再有 sticky 计算，也不再为每张卡片建滚动容器 */
+        table.custom-grid-mode.custom-no-sticky .custom-card-head {
+            position: static;
+            max-height: none;
+            overflow: visible;
+            box-shadow: none;
         }
         /* 吸顶区字号由设置里的「标题字号」控制（--custom-title-fs），默认 18px */
         table.custom-grid-mode .custom-card-head a.xst,
@@ -2088,17 +2110,32 @@
     };
 
     let hoverTimeout = null;
+    // 悬浮预览同一时间只允许一个在途：鼠标划过一排卡片时，
+    // 每个都能触发一次「整页 HTML + DOMParser 解析」（主线程几十毫秒），串起来就是明显卡顿
+    let _previewBusy = false;
     const handleMouseEnter = (e, url) => {
         clearTimeout(hoverTimeout);
         hoverTimeout = setTimeout(async () => {
+            if (_previewBusy) return;
+            // 已经有缓存就直接用，不再显示"正在加载"，减少一次 DOM 替换
+            const cached = STATE.threadCache[url];
             tooltip.style.left = (e.clientX + 15) + 'px';
             let topPos = e.clientY + 15;
             if (topPos + 220 > window.innerHeight) topPos = window.innerHeight - 220;
             tooltip.style.top = topPos + 'px';
             tooltip.style.display = 'block';
-            tooltip.innerHTML = '<span style="color:#666;font-size:12px;">正在加载预览...</span>';
+            if (!cached) tooltip.innerHTML = '<span style="color:#666;font-size:12px;">正在加载预览...</span>';
 
-            const data = await fetchThreadData(url);
+            _previewBusy = true;
+            let data = cached;
+            try {
+                if (!data) data = await fetchThreadData(url);
+            } catch (err) {
+                data = null;
+            } finally {
+                _previewBusy = false;
+            }
+            if (tooltip.style.display === 'none') return;   // 期间鼠标已经移开
             if (data && data.images.length > 0) {
                 tooltip.innerHTML = data.images.map(src => `<img src="${src}" style="max-width:240px; max-height:200px; object-fit:cover; margin-right:5px; border-radius:3px;">`).join('');
             } else {
@@ -2408,7 +2445,38 @@
     };
 
     // ================= 页面初始化与 DOM 监听 =================
-    document.querySelectorAll('tbody[id^="normalthread_"]').forEach(processThreadNode);
+    // 卡片初始化分帧执行：长列表（无缝翻页叠加后常常上百张）一次性处理会形成几百毫秒的长任务，
+    // 期间点击没反应、渲染只出来一半，这里改成每帧只处理一小批
+    const _nodeQueue = [];
+    let _nodeQueueRaf = 0;
+    // 后台标签页里 requestAnimationFrame 不触发，退化成 setTimeout，避免卡片一直没被处理
+    const _queueTick = (fn) => document.hidden ? setTimeout(fn, 16) : requestAnimationFrame(fn);
+    const _flushNodeQueue = () => {
+        _nodeQueueRaf = 0;
+        const t0 = performance.now();
+        let n = 0;
+        while (_nodeQueue.length && n < 8 && performance.now() - t0 < 12) {
+            const tb = _nodeQueue.shift();
+            n++;
+            try { processThreadNode(tb); } catch (err) { console.error('[自定义] 处理卡片失败', err); }
+        }
+        if (_nodeQueue.length) _nodeQueueRaf = _queueTick(_flushNodeQueue);
+    };
+    const scheduleThreadNode = (tb) => {
+        if (!tb || tb.nodeType !== 1) return;
+        if (tb.hasAttribute && tb.hasAttribute('data-custom-processed')) return;
+        if (_nodeQueue.indexOf(tb) >= 0) return;
+        _nodeQueue.push(tb);
+        if (!_nodeQueueRaf) _nodeQueueRaf = _queueTick(_flushNodeQueue);
+    };
+
+    const _initNodes = Array.from(document.querySelectorAll('tbody[id^="normalthread_"]'));
+    if (_initNodes.length <= 40) {
+        // 首屏卡片不多时直接同步处理，避免样式晚一帧闪一下
+        _initNodes.forEach(processThreadNode);
+    } else {
+        _initNodes.forEach(scheduleThreadNode);
+    }
 
     const observer = new MutationObserver((mutationsList) => {
         for (let mutation of mutationsList) {
@@ -2416,9 +2484,9 @@
                 mutation.addedNodes.forEach(node => {
                     if (node.nodeType === 1) {
                         if (node.tagName === 'TBODY' && node.id && node.id.startsWith('normalthread_')) {
-                            processThreadNode(node);
+                            scheduleThreadNode(node);
                         } else if (node.querySelectorAll) {
-                            node.querySelectorAll('tbody[id^="normalthread_"]').forEach(processThreadNode);
+                            node.querySelectorAll('tbody[id^="normalthread_"]').forEach(scheduleThreadNode);
                         }
                     }
                 });
@@ -2524,6 +2592,8 @@
         if (oldColgroup) oldColgroup.remove();
         table.style.setProperty('--custom-cols', String(cols));
         table.classList.add('custom-grid-mode');
+        // 吸顶开关（卡顿时可以在设置里关掉，交给浏览器省下 sticky 计算）
+        table.classList.toggle('custom-no-sticky', !STATE.stickyHeadEnabled);
         // 解开阻断 sticky 的 overflow:hidden（表格本身 + 外层包裹层 + 每张卡片的标题容器）
         applyStickyFix(table);
     };
@@ -2612,11 +2682,24 @@
         }
     };
 
+    // 滚动到底自动加载下一页：合并到一帧、并且加冷却时间，
+    // 避免滚动过程中每帧都读一次 offsetHeight（强制布局）+ 连续触发 fetch
+    let _nextPageRaf = 0;
+    let _nextPageStamp = 0;
     window.addEventListener('scroll', () => {
-        if (STATE.autoLoadNextPage && (window.innerHeight + window.scrollY) >= document.body.offsetHeight - 800) {
-            autoLoadNextPage();
-        }
-    });
+        if (!STATE.autoLoadNextPage) return;
+        if (_nextPageRaf) return;
+        _nextPageRaf = requestAnimationFrame(() => {
+            _nextPageRaf = 0;
+            const now = Date.now();
+            if (now - _nextPageStamp < 600) return;   // 冷却：翻页后 0.6s 内不重复触发
+            const docH = document.documentElement.scrollHeight;
+            if (window.innerHeight + window.scrollY >= docH - 800) {
+                _nextPageStamp = now;
+                autoLoadNextPage();
+            }
+        });
+    }, { passive: true });
 
     // ================= 一次性加载多页 =================
     const bulkLoadPages = async (pageCount) => {
@@ -3166,6 +3249,27 @@
     listColsRow.appendChild(listColsLabel);
     listColsRow.appendChild(listColsSelect);
     settingsPanel.appendChild(listColsRow);
+
+    // 标题吸顶开关（多列布局下，长卡片滚动时标题常驻顶部；卡顿可关掉）
+    const stickyHeadRow = document.createElement('div');
+    stickyHeadRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const stickyHeadLabel = document.createElement('span');
+    stickyHeadLabel.innerText = '📌 标题吸顶（多列布局）';
+    stickyHeadLabel.title = '关闭后不再为每张卡片做 sticky 定位，滚动更省性能，但标题不会固定在顶部';
+    stickyHeadLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333;';
+    const stickyHeadSwitch = document.createElement('input');
+    stickyHeadSwitch.type = 'checkbox';
+    stickyHeadSwitch.checked = !!STATE.stickyHeadEnabled;
+    stickyHeadSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    stickyHeadSwitch.onchange = (e) => {
+        STATE.stickyHeadEnabled = e.target.checked;
+        saveState('custom_sticky_head', STATE.stickyHeadEnabled);
+        applyListColumns();
+        showToast(STATE.stickyHeadEnabled ? '📌 标题吸顶已开启' : '📌 标题吸顶已关闭（滚动更省性能）', 'info');
+    };
+    stickyHeadRow.appendChild(stickyHeadLabel);
+    stickyHeadRow.appendChild(stickyHeadSwitch);
+    settingsPanel.appendChild(stickyHeadRow);
 
     // 标题下方显示可复制的纯文本
     const titleCopyRow = document.createElement('div');
@@ -6546,7 +6650,8 @@
             const relX = e.clientX - rect.left, relY = e.clientY - rect.top;
             _drag = {
                 ox: e.clientX, oy: e.clientY,
-                sx: b.offsetLeft, sy: b.offsetTop,
+                // 用 rect 里的位置，避免再读 offsetLeft/offsetTop 触发一次强制布局
+                sx: Math.round(rect.left), sy: Math.round(rect.top),
                 type: relY < 30 ? 'move' : 'scroll',
                 dir: 0, dist: 0
             };
@@ -6586,7 +6691,9 @@
         const _onUp = (e) => {
             if (!_drag) return;
             if (_drag.type === 'move') {
-                STATE.scrollBallX = b.offsetLeft; STATE.scrollBallY = b.offsetTop;
+                // 读 style 里的坐标，不用 offsetLeft/offsetTop（那会强制布局）
+                STATE.scrollBallX = Math.round(parseFloat(b.style.left) || 0);
+                STATE.scrollBallY = Math.round(parseFloat(b.style.top) || 0);
                 saveState('custom_scroll_ball_x', STATE.scrollBallX); saveState('custom_scroll_ball_y', STATE.scrollBallY);
             } else if (_drag.type === 'scroll' && _mode === 'dragging') {
                 _mode = 'idle'; _speed = 0; _stopRaf();
@@ -6597,6 +6704,10 @@
         b.addEventListener('mousedown', _onDown);
         document.addEventListener('mousemove', _onMove);
         document.addEventListener('mouseup', _onUp);
+        // 兜底：鼠标在窗口外松开 / 窗口失焦时收不到 mouseup，会把拖拽状态卡住（页面一直自滚、点不动）
+        window.addEventListener('mouseup', _onUp, true);
+        window.addEventListener('blur', () => { if (_drag || _mode === 'dragging') _onUp({}); });
+        document.addEventListener('mouseleave', () => { if (_mode === 'dragging') _onUp({}); });
         // 手动滚轮 / 按键 → 取消自动滚动
         window.addEventListener('wheel', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
         window.addEventListener('keydown', () => { if (_mode === 'locked') { _mode = 'idle'; _speed = 0; _stopRaf(); _updateDisplay(); } }, { passive: true });
@@ -6707,11 +6818,20 @@
         }, true);
 
         // 页面可滚动就显示（同时受开关控制）
+        // 注意：读 scrollHeight 会强制同步布局，所以合并到一帧里只做一次，
+        // 否则 body 上每次 DOM 变化（提取/翻页/Toast）都会触发一次全页重排
+        let _visRaf = 0;
         const _checkVisibility = () => {
-            if (!STATE.scrollBallEnabled) { b.style.display = 'none'; return; }
-            if (document.body.scrollHeight > window.innerHeight * 1.2) {
-                b.style.display = 'flex';
-            }
+            if (_visRaf) return;
+            _visRaf = requestAnimationFrame(() => {
+                _visRaf = 0;
+                if (!STATE.scrollBallEnabled) {
+                    if (b.style.display !== 'none') b.style.display = 'none';
+                    return;
+                }
+                const need = document.documentElement.scrollHeight > window.innerHeight * 1.2 ? 'flex' : 'none';
+                if (b.style.display !== need) b.style.display = need;
+            });
         };
         _checkVisibility();
         // 监听 DOM 变化 + 滚动（多页加载后页面变长）
@@ -6739,13 +6859,14 @@
             btn.style.cssText = `position:fixed;z-index:150000;width:${JSIZE}px;height:${JSIZE}px;border-radius:50%;background:rgba(40,167,69,0.82);color:#fff;display:none;align-items:center;justify-content:center;cursor:pointer;font-size:22px;font-weight:bold;box-shadow:0 6px 20px rgba(0,0,0,0.3);user-select:none;transition:background 0.15s;`;
             btn.innerHTML = label;
             btn.title = dir > 0 ? '向下跳转' : '向上跳转';
-            // 位置同步到滚动小球右侧
+            // 位置同步到滚动小球右侧（读 style 里的坐标，不读 offsetLeft/offsetTop，避免强制布局）
             const syncPos = () => {
                 const ball = SCROLL_BALL;
                 if (!ball || ball.style.display === 'none') { btn.style.display = 'none'; return; }
                 if (!STATE.scrollBallEnabled) { btn.style.display = 'none'; return; }
-                btn.style.display = 'flex';
-                const bl = ball.offsetLeft, bt = ball.offsetTop;
+                if (btn.style.display !== 'flex') btn.style.display = 'flex';
+                const bl = Math.round(parseFloat(ball.style.left) || 0);
+                const bt = Math.round(parseFloat(ball.style.top) || 0);
                 btn.style.left = (bl + 88 + 10) + 'px';
                 btn.style.top = (bt + topOffset) + 'px';
             };
@@ -6759,11 +6880,19 @@
         const dnBtn = mkJumpBtn('⬇', 1, 88 + JGAP);
         document.body.appendChild(upBtn.btn);
         document.body.appendChild(dnBtn.btn);
-        // 初始同步 & 持续监听
-        setTimeout(() => { upBtn.syncPos(); dnBtn.syncPos(); }, 500);
-        window.addEventListener('scroll', () => { upBtn.syncPos(); dnBtn.syncPos(); }, { passive: true });
-        window.addEventListener('resize', () => { upBtn.syncPos(); dnBtn.syncPos(); });
-        new MutationObserver(() => { upBtn.syncPos(); dnBtn.syncPos(); }).observe(document.body, { childList: true, subtree: true });
+        // 初始同步 & 持续监听（统一合并到一帧，避免 body 每次 DOM 变化都重排一遍）
+        let _posRaf = 0;
+        const _syncPosSoon = () => {
+            if (_posRaf) return;
+            _posRaf = requestAnimationFrame(() => {
+                _posRaf = 0;
+                upBtn.syncPos(); dnBtn.syncPos();
+            });
+        };
+        setTimeout(_syncPosSoon, 500);
+        window.addEventListener('scroll', _syncPosSoon, { passive: true });
+        window.addEventListener('resize', _syncPosSoon);
+        new MutationObserver(_syncPosSoon).observe(document.body, { childList: true, subtree: true });
         // 暴露给键盘快捷键使用
         window._customJumpBtns = { getJumpPx };
     })();
@@ -6792,15 +6921,20 @@
     const updateMinBtnPos = () => {
         if (panel.style.display === 'none') { minimizeBtn.style.display = 'none'; return; }
         const rect = panel.getBoundingClientRect();
-        minimizeBtn.style.display = 'flex';
+        if (minimizeBtn.style.display !== 'flex') minimizeBtn.style.display = 'flex';
         minimizeBtn.style.top = (rect.top - 16) + 'px';
         minimizeBtn.style.left = (rect.right - 16) + 'px';
     };
+    // 滚动时每帧只算一次（getBoundingClientRect 会强制布局）
+    let _minBtnRaf = 0;
+    const updateMinBtnPosSoon = () => {
+        if (_minBtnRaf) return;
+        _minBtnRaf = requestAnimationFrame(() => { _minBtnRaf = 0; updateMinBtnPos(); });
+    };
     updateMinBtnPos();
-    // 监听面板变化（简单轮询或用 ResizeObserver）
-    new MutationObserver(updateMinBtnPos).observe(panel, { attributes: true, childList: true, subtree: true });
-    window.addEventListener('resize', updateMinBtnPos);
-    window.addEventListener('scroll', updateMinBtnPos);
+    new MutationObserver(updateMinBtnPosSoon).observe(panel, { attributes: true, childList: true, subtree: true });
+    window.addEventListener('resize', updateMinBtnPosSoon);
+    window.addEventListener('scroll', updateMinBtnPosSoon, { passive: true });
 
     // ================= 启动时应用面板默认状态 =================
     if (STATE.panelStartMinimized) {
@@ -7431,7 +7565,21 @@
         document.addEventListener('mouseup', (e) => {
             setTimeout(() => {
                 const sel = window.getSelection();
-                const text = (sel && sel.toString() || '').trim();
+                if (!sel || !sel.rangeCount || sel.isCollapsed) {
+                    popup.style.display = 'none';
+                    return;
+                }
+                const range = sel.getRangeAt(0);
+                // 跨整页的拖选（共同祖先是 body / table）没有弹窗意义，
+                // 而且 sel.toString() 把几万字拼起来本身就卡主线程，直接跳过
+                const _ca = range.commonAncestorContainer;
+                const _caEl = _ca.nodeType === 1 ? _ca : _ca.parentElement;
+                if (!_caEl || _caEl === document.body || _caEl === document.documentElement ||
+                    _caEl.tagName === 'TABLE' || _caEl.tagName === 'HTML') {
+                    popup.style.display = 'none';
+                    return;
+                }
+                const text = (sel.toString() || '').trim();
                 if (!text || text.length < 2 || text.length > 200) {
                     popup.style.display = 'none';
                     return;
@@ -7444,8 +7592,6 @@
                 }
                 // 不拦截右键
                 if (e.button === 2) return;
-
-                const range = sel.getRangeAt(0);
 
                 // 搜索词：选中文字里能认出番号就用它，否则退回标题里的番号，都没有就用原文
                 const codeFromSel = extractCode(text);
