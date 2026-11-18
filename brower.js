@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.23
+// @version      15.24
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -501,6 +501,31 @@
         table.custom-grid-mode .custom-link-list {
             max-height: 110px;
         }
+        /* 番号搜索条：钉着的标题下面一行（🏷 番号 + 论坛/115/双搜） */
+        .custom-code-bar {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin: 5px 0 2px;
+            max-width: 100%;
+            min-width: 0;
+        }
+        .custom-code-bar .custom-code-tag {
+            flex: 0 0 auto;
+            font-size: 12px;
+            font-weight: bold;
+            line-height: 1.35;
+            color: #495057;
+            background: #eef1f4;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            padding: 3px 7px;
+            white-space: nowrap;
+        }
+        .custom-code-bar button:hover {
+            opacity: 0.88;
+        }
         table.custom-grid-mode .custom-card-head .custom-extracted,
         table.custom-grid-mode .custom-card-head > div {
             min-width: 0;
@@ -535,6 +560,44 @@
     const tooltip = document.createElement('div');
     tooltip.id = 'custom-hover-tooltip';
     document.body.appendChild(tooltip);
+
+    // ================= 番号识别 + 搜索（划词弹窗 / 吸顶搜索条共用） =================
+    // 从一段文本里提取「字母-数字」番号（JUQ-123 / SISS-123 / FC2-PPV-1234567）
+    // 提取范围按"空格"为界：向前走到空格、向后走到空格；
+    // 同一片段里粘连的中文和标点会被剥掉，所以 "test】JUQ-123 出test" 也能得到 "JUQ-123"
+    const extractCode = (raw) => {
+        const text = String(raw || '').replace(/[－—–]/g, '-');
+        // 字母(2~8) - 数字(2~8)，数字后面不能再直接跟字母（排掉 HEVC-10bit 这类）
+        const m = /[A-Za-z]{2,8}-\d{2,8}(?![A-Za-z])/.exec(text);
+        if (!m) return '';
+        let s = m.index;
+        let e = m.index + m[0].length;
+        // 向前/向后扩展到空格（只吃番号合法字符，遇到空格、中文、标点就停）
+        while (s > 0 && /[A-Za-z0-9_-]/.test(text[s - 1])) s--;
+        while (e < text.length && /[A-Za-z0-9_-]/.test(text[e])) e++;
+        return text.slice(s, e).replace(/^[-_]+|[-_]+$/g, '');
+    };
+
+    const forumSearch = (text) => {
+        const form = document.getElementById('scbar_form');
+        const input = document.getElementById('scbar_txt');
+        if (form && input) {
+            input.value = text;
+            form.submit();
+        } else {
+            window.open('/search.php?mod=forum&searchsubmit=yes&srchtxt=' + encodeURIComponent(text), '_blank');
+        }
+    };
+
+    const search115 = (text) => {
+        const url = 'https://115.com/?url=' + encodeURIComponent('/?aid=1&cid=0&old_cid=0&old_cid_name=%E6%A0%B9%E7%9B%AE%E5%BD%95&search_value=' + encodeURIComponent(text) + '&ct=file&ac=search&is_wl_tpl=1') + '&submode=wangpan&mode=search';
+        GM_openInTab(url, { active: true });
+    };
+
+    const searchBoth = (text) => {
+        forumSearch(text);
+        setTimeout(() => search115(text), 500);
+    };
 
     // ================= Toast 提示 =================
     const showToast = (msg, type = 'success') => {
@@ -2158,6 +2221,50 @@
         return head;
     };
 
+    // 番号搜索条：钉着的标题下面一行（🏷 番号 + 论坛 / 115 / 双搜），点一下就用番号搜索
+    // 卡片初始化时就建好，没提取过内容也能直接用
+    const ensureCodeBar = (tbody, host) => {
+        const head = host || tbody.querySelector('.custom-card-head');
+        if (!head) return null;
+        const exist = head.querySelector('.custom-code-bar');
+        if (exist) return exist;
+
+        const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+        const titleRaw = link ? (link.textContent || '').replace(/\s+/g, ' ').trim() : '';
+        const code = extractCode(titleRaw);
+        // 没有番号就退回用标题当搜索词（去掉【】方括号这类噪声）
+        const keyword = code || titleRaw.replace(/[【】\[\]]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+        if (!keyword) return null;
+
+        const bar = document.createElement('div');
+        bar.className = 'custom-code-bar';
+        bar.dataset.customStickyPart = 'code';
+
+        if (code) {
+            const tag = document.createElement('span');
+            tag.className = 'custom-code-tag';
+            tag.innerText = '🏷 ' + code;
+            tag.title = '从标题识别出的番号，下面的按钮都用它搜索';
+            bar.appendChild(tag);
+        }
+
+        const mkSearchBtn = (label, tip, bg, onClick) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.innerText = label;
+            b.title = tip + '：' + keyword;
+            b.style.cssText = `flex:0 0 auto; padding:3px 8px; font-size:12px; line-height:1.35; font-weight:bold; color:#fff; background:${bg}; border:none; border-radius:4px; cursor:pointer; white-space:nowrap;`;
+            b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); onClick(); };
+            return b;
+        };
+        bar.appendChild(mkSearchBtn('🔍 论坛', '用番号搜论坛', '#007bff', () => forumSearch(keyword)));
+        bar.appendChild(mkSearchBtn('🔗 115', '用番号搜 115', '#21b553', () => search115(keyword)));
+        bar.appendChild(mkSearchBtn('🔍+🔗', '论坛 + 115 同时搜索', '#6f42c1', () => searchBoth(keyword)));
+
+        head.appendChild(bar);
+        return bar;
+    };
+
     // 在标题链接下方复制一份纯文本：不是链接，点了不会跳转，可直接选中复制
     const ensureTitleCopy = (tbody, link) => {
         if (!link) return;
@@ -2239,6 +2346,9 @@
 
         // 标题下方复制一份纯文本，方便直接选中复制（不会触发跳转）
         ensureTitleCopy(tbody, link);
+
+        // 钉着的标题下面补一行番号搜索按钮（排在可复制文本之后，不提取内容也生效）
+        if (cardHead) ensureCodeBar(tbody, cardHead);
 
         // 拖选文字时不再误触发跳转
         let _downX = 0, _downY = 0;
@@ -4189,6 +4299,9 @@
             });
             box.appendChild(imgWrap);
         }
+
+        // ---- 番号搜索条：卡片初始化时已建好，刷新时被清掉的话这里补一次 ----
+        if (stickyMount) ensureCodeBar(tbody, stickyMount);
 
         // ---- 购买主题提示条（.locked 里的"购买主题/记录/已有 N 人购买"），跟着标题一起吸顶 ----
         if (data.locked && data.locked.isPay) {
@@ -7287,22 +7400,7 @@
         popup.style.cssText = 'display:none; position:fixed; z-index:200000; background:#fff; border:1px solid #ccc; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.25); padding:8px;';
         document.body.appendChild(popup);
 
-        const forumSearch = (text) => {
-            const form = document.getElementById('scbar_form');
-            const input = document.getElementById('scbar_txt');
-            if (form && input) {
-                input.value = text;
-                form.submit();
-            } else {
-                window.open('/search.php?mod=forum&searchsubmit=yes&srchtxt=' + encodeURIComponent(text), '_blank');
-            }
-        };
-
-        const search115 = (text) => {
-            const url = 'https://115.com/?url=' + encodeURIComponent('/?aid=1&cid=0&old_cid=0&old_cid_name=%E6%A0%B9%E7%9B%AE%E5%BD%95&search_value=' + encodeURIComponent(text) + '&ct=file&ac=search&is_wl_tpl=1') + '&submode=wangpan&mode=search';
-            GM_openInTab(url, { active: true });
-        };
-
+        // forumSearch / search115 / extractCode 都提到外层了，与吸顶搜索条共用一份实现
         const mkBtn = (label, bg, onClick) => {
             const btn = document.createElement('button');
             btn.type = 'button';
@@ -7310,6 +7408,24 @@
             btn.style.cssText = `display:block; width:100%; padding:6px 12px; margin:2px 0; font-size:12px; cursor:pointer; background:${bg}; color:#fff; border:none; border-radius:4px; font-weight:bold; white-space:nowrap;`;
             btn.onclick = (e) => { e.stopPropagation(); onClick(); popup.style.display = 'none'; };
             return btn;
+        };
+
+        // 取划词所在帖子的标题：列表页卡片标题 / 详情页主题标题 / 兜底页面标题
+        const titleOfSelection = (range) => {
+            try {
+                const node = range.startContainer;
+                const el = node.nodeType === 1 ? node : node.parentElement;
+                if (el) {
+                    const row = el.closest('tbody[id^="normalthread_"]');
+                    if (row) {
+                        const a = row.querySelector('a.xst') || row.querySelector('th a[href*="thread-"]');
+                        if (a) return (a.textContent || '').trim();
+                    }
+                    const subj = el.closest('#thread_subject') || document.getElementById('thread_subject');
+                    if (subj) return (subj.textContent || '').trim();
+                }
+            } catch (err) {}
+            return document.title || '';
         };
 
         document.addEventListener('mouseup', (e) => {
@@ -7329,13 +7445,26 @@
                 // 不拦截右键
                 if (e.button === 2) return;
 
+                const range = sel.getRangeAt(0);
+
+                // 搜索词：选中文字里能认出番号就用它，否则退回标题里的番号，都没有就用原文
+                const codeFromSel = extractCode(text);
+                const code = codeFromSel || extractCode(titleOfSelection(range));
+                const query = code || text;
+
                 popup.innerHTML = '';
-                popup.appendChild(mkBtn('🔍 论坛搜索: ' + text.substring(0, 30), '#007bff', () => forumSearch(text)));
-                popup.appendChild(mkBtn('🔗 115搜索: ' + text.substring(0, 30), '#21b553', () => search115(text)));
-                popup.appendChild(mkBtn('🔍+🔗 论坛+115同时搜索', '#6f42c1', () => { forumSearch(text); setTimeout(() => search115(text), 500); }));
+                if (code) {
+                    const tip = document.createElement('div');
+                    tip.style.cssText = 'font-size:11px; color:#666; margin:0 2px 5px; white-space:nowrap;';
+                    tip.innerText = '🏷 番号：' + code + (codeFromSel ? '（来自选中文字）' : '（来自标题）');
+                    tip.title = '三个按钮都会用这个番号搜索';
+                    popup.appendChild(tip);
+                }
+                popup.appendChild(mkBtn('🔍 论坛搜索: ' + query.substring(0, 30), '#007bff', () => forumSearch(query)));
+                popup.appendChild(mkBtn('🔗 115搜索: ' + query.substring(0, 30), '#21b553', () => search115(query)));
+                popup.appendChild(mkBtn('🔍+🔗 论坛+115同时搜索', '#6f42c1', () => searchBoth(query)));
 
                 // 定位弹窗在选中文字附近
-                const range = sel.getRangeAt(0);
                 const rect = range.getBoundingClientRect();
                 let top = rect.bottom + 8;
                 let left = rect.left;
