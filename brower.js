@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.29
+// @version      15.30
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -834,13 +834,15 @@
             const doc = new DOMParser().parseFromString(html, 'text/html');
             const firstPost = doc.querySelector('#postlist > div[id^="post_"]');
 
-            let data = { images: [], magnets: [], ed2ks: [], torrents: [], txts: [], archives: [], locked: null };
+            let data = { images: [], allImages: [], magnets: [], ed2ks: [], torrents: [], txts: [], archives: [], locked: null };
             if (firstPost) {
                 const imgElements = firstPost.querySelectorAll('.t_f img, .pcb img');
-                data.images = Array.from(imgElements)
+                // 全量留一份：先只渲染前 N 张，「继续加载」按钮按需追加剩下的
+                const _allImgs = Array.from(imgElements)
                     .map(img => img.getAttribute('file') || img.getAttribute('zoomfile') || img.src)
-                    .filter(src => src && !src.includes('smilie') && !src.includes('avatar') && !src.includes('torrent.gif'))
-                    .slice(0, STATE.imageCount);
+                    .filter(src => src && !src.includes('smilie') && !src.includes('avatar') && !src.includes('torrent.gif'));
+                data.allImages = _allImgs;
+                data.images = _allImgs.slice(0, STATE.imageCount);
 
                 const magnetRegex = /magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/gi;
                 data.magnets = [...new Set(firstPost.innerHTML.match(magnetRegex) || [])];
@@ -4788,29 +4790,65 @@
         box.style.cssText = 'margin-top:10px; padding-left:25px; display:flex; flex-direction:column; gap:8px; max-width:100%; overflow:hidden; box-sizing:border-box;';
 
         // ---- 图片 ----
-        if (data.images.length > 0) {
+        // 先只渲染前 N 张（设置里的「提取图片数量」），剩下的用「继续加载」按钮按需追加：
+        // 合集帖首帖动辄几十张图，一次性铺开会把卡片撑到几千像素、图片同时开几十个连接
+        const allImages = (data.allImages && data.allImages.length) ? data.allImages : data.images;
+        if (allImages.length > 0) {
             const imgWrap = document.createElement('div');
-            if (STATE.imageDisplayMode === 'scroll') {
+            const _isScroll = STATE.imageDisplayMode === 'scroll';
+            if (_isScroll) {
                 // 横向滚动模式
                 imgWrap.style.cssText = 'overflow-x:auto; white-space:nowrap; padding:4px 0; -webkit-overflow-scrolling:touch;';
-                data.images.forEach((src, i) => {
-                    const img = document.createElement('img');
-                    img.src = src;
-                    img.dataset.idx = i;
-                    img.style.cssText = `max-height:${STATE.imageSize}; max-width:100%; object-fit:cover; border-radius:4px; margin-right:6px; cursor:pointer; display:inline-block; vertical-align:top;`;
-                    imgWrap.appendChild(img);
-                });
-            } else {
-                // 默认纵向堆叠模式
-                imgWrap.innerHTML = data.images.map((src, i) => `<img src="${src}" data-idx="${i}" style="max-height:${STATE.imageSize}; max-width:100%; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;">`).join('');
             }
+            let _shown = 0;
+            const IMG_MORE_BATCH = 6;
+            const _appendImgs = (count) => {
+                const slice = allImages.slice(_shown, _shown + count);
+                if (_isScroll) {
+                    slice.forEach((src) => {
+                        const img = document.createElement('img');
+                        img.src = src;
+                        img.dataset.idx = _shown++;
+                        img.style.cssText = `max-height:${STATE.imageSize}; max-width:100%; object-fit:cover; border-radius:4px; margin-right:6px; cursor:pointer; display:inline-block; vertical-align:top;`;
+                        imgWrap.appendChild(img);
+                    });
+                } else {
+                    // 默认纵向堆叠模式（用临时容器接管 innerHTML，再逐个子节点搬进来，保持追加顺序）
+                    const tmp = document.createElement('div');
+                    tmp.innerHTML = slice.map(src => `<img src="${src}" data-idx="${_shown++}" style="max-height:${STATE.imageSize}; max-width:100%; object-fit:cover; border-radius:4px; margin-right:5px; cursor:pointer;">`).join('');
+                    while (tmp.firstChild) imgWrap.appendChild(tmp.firstChild);
+                }
+            };
+            _appendImgs(Math.min(STATE.imageCount, allImages.length));
+
             imgWrap.addEventListener('click', (e) => {
                 if (e.target.tagName === 'IMG') {
                     e.preventDefault(); e.stopPropagation();
-                    openLightbox(data.images, parseInt(e.target.dataset.idx));
+                    // 灯箱用全量列表，翻页能一直翻到还没加载的图
+                    openLightbox(allImages, parseInt(e.target.dataset.idx, 10));
                 }
             });
             box.appendChild(imgWrap);
+
+            // 还有没显示的图 → 图片后面挂一个「继续加载」按钮
+            if (allImages.length > _shown) {
+                const moreBtn = document.createElement('button');
+                moreBtn.type = 'button';
+                moreBtn.className = 'custom-more-img-btn';
+                moreBtn.style.cssText = 'align-self:flex-start; font-size:12px; padding:4px 12px; cursor:pointer; background:#f1f3f5; color:#495057; border:1px solid #ced4da; border-radius:4px; font-weight:bold;';
+                const _syncMoreBtn = () => {
+                    const left = allImages.length - _shown;
+                    if (left > 0) moreBtn.innerText = `🖼 继续加载 ${Math.min(IMG_MORE_BATCH, left)} 张（还剩 ${left} 张）`;
+                    else moreBtn.remove();
+                };
+                _syncMoreBtn();
+                moreBtn.onclick = (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    _appendImgs(IMG_MORE_BATCH);
+                    _syncMoreBtn();
+                };
+                box.appendChild(moreBtn);
+            }
         }
 
         // ---- 番号搜索条：卡片初始化时已建好，刷新时被清掉的话这里补一次 ----
