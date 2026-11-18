@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.26
+// @version      15.27
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -58,6 +58,8 @@
         concurrentEnabled: GM_getValue('custom_concurrent_enabled', false),
         concurrentCount: GM_getValue('custom_concurrent_count', 3),
         concurrentDelay: GM_getValue('custom_concurrent_delay', 600),
+        attachLimit: GM_getValue('custom_attach_limit', 12), // 单帖最多读取多少个附件（种子/TXT/压缩包）
+        netDebug: GM_getValue('custom_net_debug', false), // 打印每个网络请求（排障用，默认关）
         offline115Cid: GM_getValue('offline_115_cid', '0'),
         offline115CidName: GM_getValue('offline_115_cid_name', '根目录'),
         offline115AutoOpen: GM_getValue('offline_115_auto_open', false),
@@ -1023,49 +1025,92 @@
         return window.JSZip;
     };
 
-    // GM_xmlhttpRequest 封装 —— 绕过 CORS 限制 + 防盗链
-    const gmFetch = (url, responseType = 'text') => new Promise((resolve, reject) => {
-        if (typeof GM_xmlhttpRequest !== 'function') {
-            reject(new Error('GM_xmlhttpRequest 不可用'));
-            return;
-        }
-        console.log('[gmFetch] 尝试请求:', url);
-        const doRequest = (useCookie) => {
-            const opts = {
-                method: 'GET',
-                url: url,
-                responseType: responseType,
-                timeout: responseType === 'blob' || responseType === 'arraybuffer' ? 60000 : 30000,
-                headers: {
-                    'Referer': location.href,
-                    'User-Agent': navigator.userAgent
-                },
-                onload: (resp) => {
-                    console.log('[gmFetch] 响应状态:', resp.status, 'URL:', url);
-                    if (resp.status >= 200 && resp.status < 400) {
-                        resolve(resp);
-                    } else {
-                        reject(new Error(`HTTP ${resp.status}`));
-                    }
-                },
-                onerror: (err) => {
-                    console.error('[gmFetch] 网络错误:', url, err);
-                    if (useCookie) {
-                        console.log('[gmFetch] 带 cookie 失败，尝试不带 cookie...');
-                        doRequest(false);
-                    } else {
-                        reject(new Error('网络错误'));
-                    }
-                },
-                ontimeout: () => reject(new Error('请求超时'))
-            };
-            if (useCookie && document.cookie) {
-                opts.cookie = document.cookie;
-            }
-            GM_xmlhttpRequest(opts);
-        };
-        doRequest(true);
+    // ================= 全局请求闸门 =================
+    // 一个合集帖首帖可能有几十个附件（种子/TXT/压缩包），每个附件又会多通道重试：
+    // 不设限就会一口气打出几百个请求 —— 控制台刷满 CORS/ERR_FAILED、主线程被日志拖住、
+    // 页面卡 30 秒（实测 434ms / 2318ms 两个长任务都在这里）。
+    const netLog = (...a) => { try { if (STATE.netDebug) console.log(...a); } catch (e) {} };
+    const NET_MAX_CONCURRENT = 4;
+    let _netActive = 0;
+    const _netWaiters = [];
+    const netAcquire = () => new Promise(resolve => {
+        if (_netActive < NET_MAX_CONCURRENT) { _netActive++; resolve(); return; }
+        _netWaiters.push(resolve);
     });
+    const netRelease = () => {
+        const next = _netWaiters.shift();
+        if (next) { next(); return; }   // 名额直接转交给排队者，并发数保持不变
+        _netActive = Math.max(0, _netActive - 1);
+    };
+    // 记住「哪条通道能通」：附件请求第一次成功后，后续直接用它，不再从失败通道挨个试
+    const _netChannel = { txt: null, bin: null };
+
+    // GM_xmlhttpRequest 封装 —— 绕过 CORS 限制 + 防盗链（Tampermonkey 下唯一稳的通道）
+    const gmFetch = async (url, responseType = 'text') => {
+        if (typeof GM_xmlhttpRequest !== 'function') throw new Error('GM_xmlhttpRequest 不可用');
+        await netAcquire();
+        try {
+            return await new Promise((resolve, reject) => {
+                const doRequest = (useCookie) => {
+                    netLog('[net] →', url);
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url: url,
+                        responseType: responseType,
+                        timeout: (responseType === 'blob' || responseType === 'arraybuffer') ? 60000 : 30000,
+                        headers: {
+                            'Referer': location.href,
+                            'User-Agent': navigator.userAgent
+                        },
+                        ...(useCookie && document.cookie ? { cookie: document.cookie } : {}),
+                        onload: (resp) => {
+                            netLog('[net] ←', resp.status, url);
+                            if (resp.status >= 200 && resp.status < 400) resolve(resp);
+                            else reject(new Error(`HTTP ${resp.status}`));
+                        },
+                        onerror: () => {
+                            netLog('[net] ✗', url);
+                            // 只在「带 cookie 失败」时补一次不带 cookie 的（最多两跳，不会滚雪球）
+                            if (useCookie && document.cookie) { doRequest(false); return; }
+                            reject(new Error('网络错误'));
+                        },
+                        ontimeout: () => reject(new Error('请求超时'))
+                    });
+                };
+                doRequest(true);
+            });
+        } finally {
+            netRelease();
+        }
+    };
+
+    // 二进制下载（种子 / 压缩包）：同样 GM 优先，只有 GM 不可用时才退回 fetch
+    const fetchBinary = async (url) => {
+        const viaGM = async () => {
+            const r = await gmFetch(url, 'arraybuffer');
+            return r.response;
+        };
+        const viaFetch = async () => {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            return await resp.arrayBuffer();
+        };
+        const gmOk = typeof GM_xmlhttpRequest === 'function';
+        // 上次成功的通道排前面（fetch 在油猴沙箱里对论坛附件必然 CORS 失败，别每次都先撞一遍）
+        const order = (gmOk && _netChannel.bin !== 'fetch')
+            ? [['gm', viaGM], ['fetch', viaFetch]]
+            : [['fetch', viaFetch], ['gm', viaGM]];
+        const errs = [];
+        for (const [name, fn] of order) {
+            if (name === 'gm' && !gmOk) continue;
+            try {
+                const buf = await fn();
+                _netChannel.bin = name;
+                return buf;
+            } catch (e) { errs.push(`${name}: ${e.message}`); }
+        }
+        throw new Error(errs.join(' | '));
+    };
 
     // ================= 115 网盘离线下载 API =================
     const api115 = {
@@ -1956,19 +2001,12 @@
 
     // ================= 种子 → 磁力链接转换 =================
     const torrentToMagnet = async (torrentUrl) => {
-        // 第一步：下载种子文件
+        // 第一步：下载种子文件（fetchBinary 内部会选通道 + 走并发闸门）
         let buffer;
         try {
-            const resp = await fetch(torrentUrl);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            buffer = await resp.arrayBuffer();
+            buffer = await fetchBinary(torrentUrl);
         } catch (e) {
-            try {
-                const gmResp = await gmFetch(torrentUrl, 'arraybuffer');
-                buffer = gmResp.response; // GM_xmlhttpRequest 的 arraybuffer 响应直接在 .response
-            } catch (gmErr) {
-                return { error: '无法下载种子文件' };
-            }
+            return { error: '无法下载种子文件' };
         }
 
         const bytes = new Uint8Array(buffer);
@@ -2062,36 +2100,50 @@
             xhr.send();
         });
 
-        // 带重试的请求
-        const tryFetch = async (attempt) => {
-            const errs = [];
-            // 尝试1: fetch with credentials
-            try {
-                const resp = await fetch(url, { credentials: 'include', cache: 'no-cache' });
-                if (!resp.ok) throw new Error(`fetch HTTP ${resp.status}`);
-                const t = await resp.text();
-                return { text: t, contentType: resp.headers.get('Content-Type') || '' };
-            } catch (e) { errs.push('fetch+cred: ' + e.message); }
-
-            // 尝试2: XHR
-            try {
-                return await xhrFetch(url);
-            } catch (e) { errs.push('XHR: ' + e.message); }
-
-            // 尝试3: GM_xmlhttpRequest
-            try {
-                const gmResp = await gmFetch(url, 'text');
-                return { text: gmResp.responseText, contentType: '' };
-            } catch (e) { errs.push('GM: ' + e.message); }
-
-            throw new Error(errs.join(' | '));
+        const fetchDirect = async () => {
+            const resp = await fetch(url, { credentials: 'include', cache: 'no-cache' });
+            if (!resp.ok) throw new Error(`fetch HTTP ${resp.status}`);
+            return { text: await resp.text(), contentType: resp.headers.get('Content-Type') || '' };
         };
 
-        // 最多重试3次，间隔递增
+        // 通道顺序：GM 优先（能带 Referer、绕 CORS，油猴下唯一稳的），XHR / fetch 只做兜底。
+        // 旧顺序是 fetch → XHR → GM，前两条在油猴沙箱里必然 CORS 失败，
+        // 每个附件先刷两条报错才走到能用的那条 —— 附件一多就把控制台和主线程拖死。
+        const channels = [
+            ['gm', async () => {
+                const gmResp = await gmFetch(url, 'text');
+                return { text: gmResp.responseText, contentType: '' };
+            }],
+            ['xhr', () => xhrFetch(url)],
+            ['fetch', fetchDirect],
+        ];
+        // 上次成功的通道直接排到最前
+        if (_netChannel.txt) {
+            channels.sort((a, b) => (b[0] === _netChannel.txt ? 1 : 0) - (a[0] === _netChannel.txt ? 1 : 0));
+        }
+
+        const tryOnce = async () => {
+            const errs = [];
+            for (const [name, fn] of channels) {
+                if (name === 'gm' && typeof GM_xmlhttpRequest !== 'function') continue;
+                try {
+                    const out = await fn();
+                    _netChannel.txt = name;
+                    return out;
+                } catch (e) { errs.push(`${name}: ${e.message}`); }
+            }
+            const err = new Error(errs.join(' | '));
+            // 三条通道全挂且是跨域/网络级失败 → 重试也是白打一遍，标记出来直接放弃
+            err.deterministic = /CORS|status 0|Failed to fetch|XHR onerror/i.test(err.message)
+                && !/HTTP 5\d\d/.test(err.message);
+            throw err;
+        };
+
+        // 最多 2 轮（旧的 3 轮 × 3 通道 = 9 个请求/附件，合集帖直接炸）
         let lastErr;
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 2; i++) {
             try {
-                const result = await tryFetch(i + 1);
+                const result = await tryOnce();
                 let { text, contentType } = result;
 
                 if (contentType && contentType.includes('text/html')) {
@@ -2110,11 +2162,12 @@
                 return text;
             } catch (e) {
                 lastErr = e.message;
-                if (i < 2) await new Promise(r => setTimeout(r, (i + 1) * 1500));
+                if (e.deterministic) break;            // 确定性失败不重试
+                if (i === 0) await new Promise(r => setTimeout(r, 1200));
             }
         }
 
-        console.error('[fetchTxtContent] 重试3次均失败:', url, lastErr);
+        netLog('[net] 附件读取失败:', url, lastErr);
         throw new Error(`无法访问: ${url.substring(0, 80)}...`);
     };
 
@@ -2126,17 +2179,10 @@
         // 第一步：下载压缩包
         let buffer;
         try {
-            const resp = await fetch(url);
-            if (!resp.ok) return { error: `下载失败 (HTTP ${resp.status})` };
-            buffer = await resp.arrayBuffer();
+            buffer = await fetchBinary(url);
         } catch (e) {
-            try {
-                const gmResp = await gmFetch(url, 'arraybuffer');
-                buffer = gmResp.response;
-            } catch (gmErr) {
-                console.error('[fetchAndExtractArchive] 下载失败:', url, gmErr);
-                return { error: `无法下载压缩包 (${gmErr.message})` };
-            }
+            netLog('[net] 压缩包下载失败:', url, e.message);
+            return { error: `无法下载压缩包 (${e.message})` };
         }
 
         // 第二步：内联 ZIP 读取器（零外部依赖，优先使用）
@@ -2762,14 +2808,16 @@
         // ---- 链接 ----
         // 种子是对象 {href,name}，必须先转磁力（一览页也是这么做的），否则会渲染成 [object Object]
         const links = [...data.magnets, ...data.ed2ks];
-        for (const t of data.torrents) {
+        // 同样受「单帖附件上限」约束：搜索页经常一次全选提取，合集帖能瞬间打出上百请求
+        const _budget = Math.max(1, parseInt(STATE.attachLimit, 10) || 12);
+        for (const t of data.torrents.slice(0, _budget)) {
             try {
                 const r = await torrentToMagnet(t.href);
                 if (r && r.magnet && !links.includes(r.magnet)) links.push(r.magnet);
             } catch (err) { /* 单个种子转磁力失败不影响其他链接 */ }
         }
         // TXT 附件里常直接贴磁力，顺手捞一遍（最多 3 个，别拖慢整页全选提取）
-        const _txtTargets = (data.txts || []).slice(0, 3);
+        const _txtTargets = (data.txts || []).slice(0, Math.min(3, _budget));
         for (const txt of _txtTargets) {
             try {
                 const content = await fetchTxtContent(txt.href, url);
@@ -3702,6 +3750,49 @@
     concurrentDelayRow.appendChild(concurrentDelaySelect);
     settingsPanel.appendChild(concurrentDelayRow);
 
+    // 单帖附件读取上限（合集帖可能有几十个种子/TXT，全读会卡死）
+    const attachLimitRow = document.createElement('div');
+    attachLimitRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const attachLimitLabel = document.createElement('span');
+    attachLimitLabel.innerText = '📎 单帖附件读取上限';
+    attachLimitLabel.title = '一个帖子里最多读多少个种子/TXT/压缩包。合集帖可能有几十个，全读会打出几百个请求把页面卡住；超出的部分卡片上会给「继续读取」按钮。';
+    attachLimitLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333; cursor: help;';
+    const attachLimitSelect = document.createElement('select');
+    attachLimitSelect.style.cssText = 'cursor: pointer; font-size: 12px; padding: 2px;';
+    [6, 12, 20, 30, 50, 999].forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n;
+        opt.innerText = n >= 999 ? '不限（很慢）' : n + ' 个';
+        if (n === STATE.attachLimit) opt.selected = true;
+        attachLimitSelect.appendChild(opt);
+    });
+    attachLimitSelect.onchange = (e) => {
+        STATE.attachLimit = parseInt(e.target.value, 10) || 12;
+        saveState('custom_attach_limit', STATE.attachLimit);
+    };
+    attachLimitRow.appendChild(attachLimitLabel);
+    attachLimitRow.appendChild(attachLimitSelect);
+    settingsPanel.appendChild(attachLimitRow);
+
+    // 网络调试日志（默认关：每请求两行 console 在几百请求时会明显拖慢主线程）
+    const netDebugRow = document.createElement('div');
+    netDebugRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
+    const netDebugLabel = document.createElement('span');
+    netDebugLabel.innerText = '🔧 网络调试日志';
+    netDebugLabel.title = '在控制台打印每个附件请求（URL / 状态码）。日常关闭，附件多时开它会明显变卡。';
+    netDebugLabel.style.cssText = 'font-size: 13px; font-weight: bold; color: #333; cursor: help;';
+    const netDebugSwitch = document.createElement('input');
+    netDebugSwitch.type = 'checkbox';
+    netDebugSwitch.checked = STATE.netDebug;
+    netDebugSwitch.style.cssText = 'cursor: pointer; width: 16px; height: 16px;';
+    netDebugSwitch.onchange = (e) => {
+        STATE.netDebug = e.target.checked;
+        saveState('custom_net_debug', e.target.checked);
+    };
+    netDebugRow.appendChild(netDebugLabel);
+    netDebugRow.appendChild(netDebugSwitch);
+    settingsPanel.appendChild(netDebugRow);
+
     // 115 离线下载相关设置
     const offline115AutoRow = document.createElement('div');
     offline115AutoRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; border-bottom: 1px dashed #ccc;';
@@ -4631,7 +4722,8 @@
     };
 
     // ================= 单帖内容提取与渲染 =================
-    const extractSingleThread = async (cb) => {
+    // opts.forceAll: 忽略「单帖附件上限」，把剩下的附件也读完（卡片上的「继续读取」用它）
+    const extractSingleThread = async (cb, opts = {}) => {
         // 搜索页的卡片是 li.pbw，走单独的渲染逻辑
         const _searchCard = cb.closest('.custom-search-card');
         if (_searchCard) return extractSearchCard(cb, _searchCard);
@@ -5039,15 +5131,26 @@
         data.magnets.forEach(m => allLinks.push(m));
         data.ed2ks.forEach(link => allLinks.push(link));
 
+        // 附件预算：合集帖首帖可能挂几十个种子/TXT，全读会打出几百个请求（实测卡 30 秒）。
+        // 默认只读前 N 个，剩下的给一个「继续读取」按钮，点了再补（分批走同一个并发闸门）。
+        const _budget = opts.forceAll ? Infinity : Math.max(1, parseInt(STATE.attachLimit, 10) || 12);
+        let _left = _budget;
+        const _torrents = data.torrents.slice(0, _left); _left -= _torrents.length;
+        const _txts = data.txts.slice(0, Math.max(0, _left)); _left -= _txts.length;
+        const _archives = data.archives.slice(0, Math.max(0, _left)); _left -= _archives.length;
+        const _skipped = (data.torrents.length - _torrents.length)
+            + (data.txts.length - _txts.length)
+            + (data.archives.length - _archives.length);
+
         // 种子 → 磁力链接转换
-        for (const t of data.torrents) {
+        for (const t of _torrents) {
             const result = await torrentToMagnet(t.href);
             if (result.magnet) allLinks.push(result.magnet);
         }
 
         // 收集 TXT 内容（独立 + 压缩包）
         const allTexts = [];
-        for (const txt of data.txts) {
+        for (const txt of _txts) {
             try {
                 const content = await fetchTxtContent(txt.href, threadUrl);
                 if (content) allTexts.push({ name: txt.name, content });
@@ -5055,7 +5158,7 @@
                 allTexts.push({ name: txt.name, content: `[读取失败: ${err.message}]` });
             }
         }
-        for (const archive of data.archives) {
+        for (const archive of _archives) {
             try {
                 const result = await fetchAndExtractArchive(archive.href, archive.type);
                 if (result.error) {
@@ -5230,6 +5333,28 @@
             }
             // 链接面板已被搬到吸顶区，resWrap 可能空了
             if (resWrap.children.length > 0) box.appendChild(resWrap);
+        }
+
+        // 附件被预算截断：给一条提示 + 「继续读取」，而不是一次性把上百个请求打出去
+        if (_skipped > 0) {
+            const tip = document.createElement('div');
+            tip.style.cssText = 'display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:12px; color:#856404; background:#fffdf5; border:1px solid #ffe08a; border-radius:4px; padding:6px 8px;';
+            const tipText = document.createElement('span');
+            tipText.innerText = `📎 还有 ${_skipped} 个附件没读（单帖上限 ${STATE.attachLimit}，可在设置里调大）`;
+            tip.appendChild(tipText);
+            const moreBtn = document.createElement('button');
+            moreBtn.type = 'button';
+            moreBtn.innerText = `继续读取这 ${_skipped} 个`;
+            moreBtn.style.cssText = 'flex:0 0 auto; cursor:pointer; font-size:12px; padding:3px 10px; background:#e6a700; color:#fff; border:none; border-radius:4px; font-weight:bold;';
+            moreBtn.onclick = (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                moreBtn.disabled = true; moreBtn.innerText = '读取中...';
+                if (existingBox && existingBox.isConnected) existingBox.remove();
+                else if (box.isConnected) box.remove();
+                extractSingleThread(cb, { forceAll: true });
+            };
+            tip.appendChild(moreBtn);
+            box.appendChild(tip);
         }
 
         // 用 rAF 批量插入 DOM，减少画面抖动（刷新时原地替换旧内容，不产生高度塌陷）
@@ -5933,6 +6058,7 @@
             scrollJumpMouseInterval: 'custom_scroll_jump_mouse_interval',
             concurrentEnabled: 'custom_concurrent_enabled', concurrentCount: 'custom_concurrent_count',
             concurrentDelay: 'custom_concurrent_delay',
+            attachLimit: 'custom_attach_limit', netDebug: 'custom_net_debug',
             offline115Cid: 'offline_115_cid', offline115CidName: 'offline_115_cid_name',
             offline115AutoOpen: 'offline_115_auto_open', offline115Favorites: 'offline_115_favorites',
             offline115FavMax: 'offline_115_fav_max', lightboxCenterRatio: 'custom_lightbox_center',
