@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.25
+// @version      15.26
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -423,6 +423,68 @@
             max-height: none;
             overflow: visible;
             box-shadow: none;
+        }
+        /* ============ 搜索页（search.php）卡片化 + 多列 ============ */
+        /* 搜索页原始结果区自带固定 760px 宽度，卡片化后要放开到容器满宽，否则卡片全挤在左半屏 */
+        div.slst.custom-search-grid {
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box;
+        }
+        div.slst.custom-search-grid > ul {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            gap: 10px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+        div.slst.custom-search-grid > ul > li.pbw.custom-search-card {
+            flex: 0 0 calc((100% - (var(--custom-cols, 3) - 1) * 10px) / var(--custom-cols, 3));
+            max-width: calc((100% - (var(--custom-cols, 3) - 1) * 10px) / var(--custom-cols, 3));
+            box-sizing: border-box;
+            margin: 0 !important;
+            padding: 8px 10px;
+            list-style: none;
+            background: #fff;
+            border: 1px solid #e3e6ea;
+            border-radius: 8px;
+            /* 同样不能用 overflow:hidden，否则卡片内的吸顶标题失效 */
+            overflow: visible;
+        }
+        div.slst.custom-search-grid > ul > li.pbw.custom-search-card:hover {
+            border-color: #c9d4e3;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        /* 以下样式只在「多列开启」时生效，关掉开关就完全回到论坛原样（标题不再吸顶） */
+        div.slst.custom-search-grid .custom-search-card h3.custom-search-head {
+            position: sticky;
+            top: var(--custom-sticky-top, 0px);
+            z-index: 6;
+            background: #fff;
+            margin: 0 0 4px;
+            padding-bottom: 4px;
+            box-shadow: 0 4px 8px -6px rgba(0,0,0,0.35);
+            font-weight: normal;
+        }
+        div.slst.custom-search-grid .custom-search-card.custom-no-sticky h3.custom-search-head {
+            position: static;
+            box-shadow: none;
+        }
+        div.slst.custom-search-grid .custom-search-card h3.custom-search-head a {
+            font-size: var(--custom-title-fs, 18px) !important;
+            line-height: 1.45 !important;
+        }
+        div.slst.custom-search-grid .custom-search-card p.xg1,
+        div.slst.custom-search-grid .custom-search-card > p {
+            font-size: 12px;
+            margin: 2px 0;
+        }
+        .custom-search-card .custom-search-extracted img {
+            max-width: 100% !important;
+            height: auto !important;
+            object-fit: contain !important;
         }
         /* 吸顶区字号由设置里的「标题字号」控制（--custom-title-fs），默认 18px */
         table.custom-grid-mode .custom-card-head a.xst,
@@ -2538,7 +2600,7 @@
             raf = 0;
             const h = detectTopBarHeight();
             const val = (h > 0 ? h + 4 : 0) + 'px';
-            document.querySelectorAll('table.custom-grid-mode').forEach(t => {
+            document.querySelectorAll('table.custom-grid-mode, div.custom-search-grid').forEach(t => {
                 if (t.style.getPropertyValue('--custom-sticky-top') !== val) {
                     t.style.setProperty('--custom-sticky-top', val);
                 }
@@ -2575,10 +2637,235 @@
         return rows.join('\n');
     };
 
+    // ================= 搜索页（search.php）卡片化 =================
+    // 搜索结果不是列表页那套 tbody 表格，而是：
+    //   div#threadlist.slst > ul > li.pbw[id=tid]
+    //     h3.xs3 > a（标题，带 highlight 参数）
+    //     p.xg1（回复/查看数）、p（摘要）、p（时间 - 作者 - 版块）
+    // 本身没有任何图片/下载链接，所以这里把 li 当卡片：多列排布 + 勾选后提取图片与链接
+    const searchRoot = () => document.querySelector('div.slst#threadlist') || document.querySelector('div.slst');
+
+    // 搜索页也吃「列表多列」这一套设置（列数、总开关、吸顶开关）
+    const applySearchColumns = () => {
+        const root = searchRoot();
+        if (!root) return;
+        if (!STATE.listMultiColumn) {
+            root.classList.remove('custom-search-grid');
+            root.style.removeProperty('--custom-cols');
+            restoreStickyAncestors();
+            return;
+        }
+        const cols = Math.max(2, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
+        root.style.setProperty('--custom-cols', String(cols));
+        root.classList.add('custom-search-grid');
+        const navH = detectTopBarHeight();
+        root.style.setProperty('--custom-sticky-top', (navH > 0 ? navH + 4 : 0) + 'px');
+        bindStickyTopWatcher();
+        root.querySelectorAll('.custom-search-card').forEach(card => {
+            card.classList.toggle('custom-no-sticky', !STATE.stickyHeadEnabled);
+        });
+    };
+
+    const processSearchCard = (li) => {
+        if (!li || li.nodeType !== 1 || li.hasAttribute('data-custom-processed')) return;
+        const link = li.querySelector('h3 a[href*="viewthread"]') || li.querySelector('h3 a');
+        if (!link) return;
+        li.setAttribute('data-custom-processed', 'true');
+        li.classList.add('custom-search-card');
+        li.classList.toggle('custom-no-sticky', !STATE.stickyHeadEnabled);
+
+        const h3 = li.querySelector('h3');
+        if (h3) {
+            h3.classList.add('custom-search-head');
+            if (!h3.querySelector('.custom-thread-checkbox')) {
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'custom-thread-checkbox';
+                cb.value = link.href;
+                cb.style.cssText = 'width:15px;height:15px;margin-right:6px;vertical-align:middle;cursor:pointer;';
+                h3.insertBefore(cb, h3.firstChild);
+            }
+            // 卡片高过屏幕时标题吸顶（与一览页同一套偏移）；多列关掉时不需要解开 overflow
+            if (STATE.listMultiColumn) unblockStickyAncestors(h3);
+        }
+
+        addViewedTag(link);
+
+        // 拖选文字时不误跳转
+        let _dx = 0, _dy = 0;
+        link.addEventListener('mousedown', (e) => { _dx = e.clientX; _dy = e.clientY; });
+        link.addEventListener('click', (e) => {
+            const moved = Math.abs(e.clientX - _dx) > 6 || Math.abs(e.clientY - _dy) > 6;
+            const sel = window.getSelection();
+            if (moved || (sel && sel.toString().trim().length > 0)) { e.preventDefault(); return; }
+            markAsRead(link.href);
+            addViewedTag(link);
+        });
+    };
+
+    const initSearchPage = () => {
+        const root = searchRoot();
+        if (!root) return;
+        const list = root.querySelector('ul');
+        if (!list) return;
+        applySearchColumns();
+        Array.from(list.children).forEach(li => { if (li.tagName === 'LI') processSearchCard(li); });
+    };
+
+    // 搜索页单卡提取：图片 + 磁力/ed2k/种子链接（复用一览页的抓取与推送能力）
+    const extractSearchCard = async (cb, card) => {
+        if (card.querySelector('.custom-extracted')) return;
+        const url = cb.value;
+        cb.disabled = true;
+        const box = document.createElement('div');
+        box.className = 'custom-extracted custom-search-extracted';
+        box.style.cssText = 'margin-top:8px; display:flex; flex-direction:column; gap:8px; max-width:100%; overflow:hidden; box-sizing:border-box;';
+        box.innerHTML = '<div style="font-size:12px;color:#888;">正在提取...</div>';
+        card.appendChild(box);
+
+        const data = await fetchThreadData(url);
+        if (!data) {
+            box.remove();
+            cb.disabled = false;
+            showToast('❌ 提取失败：这个帖子打不开（可能要权限）', 'error');
+            return;
+        }
+        box.innerHTML = '';
+
+        // ---- 图片 ----
+        if (data.images.length > 0) {
+            const imgWrap = document.createElement('div');
+            if (STATE.imageDisplayMode === 'scroll') {
+                imgWrap.style.cssText = 'overflow-x:auto; white-space:nowrap; padding:4px 0;';
+                data.images.forEach((src, i) => {
+                    const img = document.createElement('img');
+                    img.src = src;
+                    img.dataset.idx = i;
+                    img.style.cssText = 'max-height:120px; max-width:100%; object-fit:cover; border-radius:4px; margin-right:6px; cursor:pointer; display:inline-block; vertical-align:top;';
+                    imgWrap.appendChild(img);
+                });
+            } else {
+                // 搜索页卡片比一览页宽，堆叠模式下原尺寸大图会把卡片撑到 800px+，
+                // 这里用 max-width + max-height 双约束（width/height:auto 才能保比例不拉伸）
+                imgWrap.style.cssText = 'text-align:center;';
+                imgWrap.innerHTML = data.images.map((src, i) => `<img src="${src}" data-idx="${i}" style="max-width:100%; max-height:220px; width:auto; height:auto; border-radius:4px; margin:0 auto 6px; cursor:pointer; display:block;">`).join('');
+            }
+            imgWrap.addEventListener('click', (e) => {
+                if (e.target.tagName === 'IMG') {
+                    e.preventDefault(); e.stopPropagation();
+                    openLightbox(data.images, parseInt(e.target.dataset.idx, 10));
+                }
+            });
+            box.appendChild(imgWrap);
+        }
+
+        // ---- 链接 ----
+        // 种子是对象 {href,name}，必须先转磁力（一览页也是这么做的），否则会渲染成 [object Object]
+        const links = [...data.magnets, ...data.ed2ks];
+        for (const t of data.torrents) {
+            try {
+                const r = await torrentToMagnet(t.href);
+                if (r && r.magnet && !links.includes(r.magnet)) links.push(r.magnet);
+            } catch (err) { /* 单个种子转磁力失败不影响其他链接 */ }
+        }
+        // TXT 附件里常直接贴磁力，顺手捞一遍（最多 3 个，别拖慢整页全选提取）
+        const _txtTargets = (data.txts || []).slice(0, 3);
+        for (const txt of _txtTargets) {
+            try {
+                const content = await fetchTxtContent(txt.href, url);
+                if (!content) continue;
+                const foundMagnet = content.match(/magnet:\?xt=urn:btih:[0-9a-zA-Z]{32,40}/gi) || [];
+                const foundEd2k = content.match(/ed2k:\/\/\|file\|[^|]+\|\d+\|[a-fA-F0-9]{32}\|/gi) || [];
+                [...foundMagnet, ...foundEd2k].forEach(one => { if (!links.includes(one)) links.push(one); });
+            } catch (err) { /* 读不到就算了 */ }
+        }
+        if (links.length > 0) {
+            const linkWrap = document.createElement('div');
+            linkWrap.style.cssText = 'border:1px solid #dee2e6; border-radius:4px; padding:8px; background:#fdfdfd;';
+            const info = document.createElement('div');
+            info.style.cssText = 'font-size:12px; font-weight:bold; color:#495057; margin-bottom:6px;';
+            const _fromTxt = Math.max(0, links.length - data.magnets.length - data.ed2ks.length - data.torrents.length);
+            info.innerText = `🔗 链接 (共 ${links.length} 条${_fromTxt > 0 ? `，TXT 里另有 ${_fromTxt} 条` : ''})`;
+            linkWrap.appendChild(info);
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px;';
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.innerText = '复制全部';
+            copyBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 12px; background:#6c757d; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+            copyBtn.onclick = (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                navigator.clipboard.writeText(links.join('\n')).then(() => {
+                    copyBtn.innerText = '已复制';
+                    setTimeout(() => { copyBtn.innerText = '复制全部'; }, 2000);
+                });
+            };
+            btnRow.appendChild(copyBtn);
+
+            const pushBtn = document.createElement('button');
+            pushBtn.type = 'button';
+            pushBtn.innerText = '☁️ 一键推送全部';
+            pushBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 12px; background:#fd7e14; color:#fff; border:none; border-radius:3px; font-weight:bold;';
+            pushBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); offline115PushLinks(links, pushBtn, { logTag: '搜索结果推送' }); };
+            btnRow.appendChild(pushBtn);
+
+            const titleEl = card.querySelector('h3 a');
+            const cardTitle = titleEl ? (titleEl.innerText || '').trim().replace(/\s+/g, ' ') : '';
+            btnRow.appendChild(offline115MakeTitleBtn(pushBtn, links, cardTitle, '☁️ 推送+标题'));
+            linkWrap.appendChild(btnRow);
+
+            // 逐行：内容 + 复制
+            const listDiv = document.createElement('div');
+            listDiv.style.cssText = 'max-height:160px; overflow-y:auto; display:flex; flex-direction:column; gap:3px;';
+            links.forEach(one => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex; align-items:center; gap:4px; min-width:0;';
+                const span = document.createElement('span');
+                span.innerText = one;
+                span.title = one;
+                span.style.cssText = 'flex:1 1 auto; min-width:0; font-size:11px; color:#666; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
+                row.appendChild(span);
+                const oneBtn = document.createElement('button');
+                oneBtn.type = 'button';
+                oneBtn.innerText = '复制';
+                oneBtn.style.cssText = 'flex:0 0 auto; font-size:11px; padding:2px 6px; cursor:pointer; background:#e9ecef; border:1px solid #ced4da; border-radius:3px;';
+                oneBtn.onclick = (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    navigator.clipboard.writeText(one).then(() => {
+                        oneBtn.innerText = '✓';
+                        setTimeout(() => { oneBtn.innerText = '复制'; }, 1500);
+                    });
+                };
+                row.appendChild(oneBtn);
+                listDiv.appendChild(row);
+            });
+            linkWrap.appendChild(listDiv);
+            box.appendChild(linkWrap);
+        }
+
+        // ---- 隐藏内容/购买主题提示 ----
+        if (data.locked) {
+            const tip = document.createElement('div');
+            tip.style.cssText = 'font-size:12px; color:#856404; background:#fffdf5; border:1px solid #ffc107; border-radius:4px; padding:6px 8px;';
+            tip.innerText = '🔒 ' + (data.locked.message || '部分内容需要回复/购买后才能查看');
+            box.appendChild(tip);
+        }
+
+        if (!box.children.length) {
+            box.innerHTML = '<div style="font-size:12px;color:#999;">这个帖子里没有可提取的图片或下载链接</div>';
+        }
+        cb.disabled = false;
+    };
+
     // 列表页多列布局：给容器加 class 并写入列数变量
     const applyListColumns = () => {
         const table = threadListContainer;
-        if (!table || table.tagName !== 'TABLE') return;
+        // 搜索页没有 tbody 表格，改走 sLst 卡片布局
+        if (!table || table.tagName !== 'TABLE') {
+            applySearchColumns();
+            return;
+        }
         const cols = Math.max(2, Math.min(5, parseInt(STATE.listColumns, 10) || 3));
         // 总开关关闭 → 回到原始表格
         if (!STATE.listMultiColumn) {
@@ -2642,10 +2929,14 @@
     };
     fixTableColumnWidths();
     applyListColumns();
+    // 搜索页：把 li.pbw 变成卡片（多列 + 勾选 + 提取）
+    initSearchPage();
 
     // ================= 无缝翻页逻辑 =================
     const autoLoadNextPage = async () => {
-        if (!STATE.autoLoadNextPage || STATE.isLoadingNextPage || !STATE.nextPageUrl || !threadListContainer) return;
+        // 搜索页结果不是 tbody 结构，走了也插不进来，直接跳过
+        if (!threadListContainer || searchRoot()) return;
+        if (!STATE.autoLoadNextPage || STATE.isLoadingNextPage || !STATE.nextPageUrl) return;
         STATE.isLoadingNextPage = true;
 
         try {
@@ -4332,13 +4623,18 @@
     let isAllSelected = false;
     btnSelectAll.onclick = () => {
         isAllSelected = !isAllSelected;
-        document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden) .custom-thread-checkbox').forEach(cb => {
+        // 搜索页的卡片没有 tbody 包裹，统一按类名选
+        document.querySelectorAll('.custom-thread-checkbox').forEach(cb => {
+            if (cb.closest('.custom-hidden')) return;
             cb.checked = isAllSelected;
         });
     };
 
     // ================= 单帖内容提取与渲染 =================
     const extractSingleThread = async (cb) => {
+        // 搜索页的卡片是 li.pbw，走单独的渲染逻辑
+        const _searchCard = cb.closest('.custom-search-card');
+        if (_searchCard) return extractSearchCard(cb, _searchCard);
         const tbody = cb.closest('tbody');
         if (!tbody) return;
         const existingBox = tbody.querySelector('.custom-extracted');
