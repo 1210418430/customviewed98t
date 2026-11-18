@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.27
+// @version      15.28
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -7382,7 +7382,11 @@
     const _hasNextPage = !!document.querySelector('a.nxt');
     if (STATE.autoExtractOnLoad && !(STATE.autoBulkLoadOnPageLoad && _hasNextPage)) {
         setTimeout(() => {
-            const visibleCbs = document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden) .custom-thread-checkbox');
+            // 搜索页（search.php）的卡片不是 tbody，之前漏掉了 → 搜索页永远不出图/链接
+            const visibleCbs = document.querySelectorAll(
+                'tbody[id^="normalthread_"]:not(.custom-hidden) .custom-thread-checkbox, ' +
+                '.custom-search-card .custom-thread-checkbox'
+            );
             if (visibleCbs.length > 0) {
                 visibleCbs.forEach(cb => { cb.checked = true; });
                 btnExtract.click();
