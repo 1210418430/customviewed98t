@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.30
+// @version      15.31
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -7922,6 +7922,77 @@
                 cardHeader.appendChild(cardBtnRow);
             }
             cardWrap.appendChild(cardHeader);
+
+            // ---- 购买主题 / 回复可见：把帖子正文里的 .locked 提取到卡片最上面 ----
+            // 正文中间那块要滚很久才看得到，放这里就能一眼看到"还差多少钱能看"，直接点购买
+            const _lockedEl = postList.querySelector('.locked');
+            if (_lockedEl) {
+                const _payLink = _lockedEl.querySelector('a[href*="action=pay"]');
+                const _recLink = _lockedEl.querySelector('a[href*="action=viewpayments"]');
+                const _replyLink = _lockedEl.querySelector('a[href*="action=reply"]');
+                const _priceEl = _lockedEl.querySelector('strong');
+                const _buyersEl = _lockedEl.querySelector('em.right') || _lockedEl.querySelector('em');
+                // 纯文字提示：剔除按钮/链接/已购人数，避免出现"购买主题回复"这类残留
+                const _clone = _lockedEl.cloneNode(true);
+                _clone.querySelectorAll('a, button, em.right').forEach(n => n.remove());
+                const _msg = (_clone.textContent || '').replace(/\s+/g, ' ').trim();
+
+                const _openPay = (url) => {
+                    if (!url) return;
+                    if (typeof showWindow === 'function') {
+                        try { showWindow('pay', url); return; } catch (err) {}
+                    }
+                    GM_openInTab(url, { active: true, insert: true });
+                };
+
+                const lockedBar = document.createElement('div');
+                lockedBar.className = 'custom-buy-bar';
+                lockedBar.style.margin = '0 0 8px';
+
+                const info = document.createElement('span');
+                info.className = 'custom-buy-info';
+                const priceTxt = _priceEl ? _priceEl.innerText.replace(/\s+/g, ' ').trim() : '';
+                const buyersNum = (_buyersEl ? (_buyersEl.innerText.match(/\d+/) || [])[0] : '') || '';
+                if (_payLink) {
+                    info.innerText = '🔒 需付 ' + (priceTxt || '金币') + ' 才能浏览'
+                        + (buyersNum ? ' · 已购 ' + buyersNum + ' 人' : '');
+                } else {
+                    info.innerText = '🔒 ' + (_msg || '需要回复后才能查看隐藏内容');
+                }
+                info.title = (_lockedEl.innerText || '').replace(/\s+/g, ' ').trim();
+                lockedBar.appendChild(info);
+
+                const btns = document.createElement('div');
+                btns.className = 'custom-buy-btns';
+                if (_payLink) {
+                    const btnBuy = document.createElement('button');
+                    btnBuy.type = 'button';
+                    btnBuy.innerText = '💰 购买主题';
+                    btnBuy.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); _openPay(_payLink.href); };
+                    btns.appendChild(btnBuy);
+                }
+                if (_recLink) {
+                    const btnRec = document.createElement('button');
+                    btnRec.type = 'button';
+                    btnRec.className = 'custom-buy-record';
+                    btnRec.innerText = '📋 记录';
+                    btnRec.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); _openPay(_recLink.href); };
+                    btns.appendChild(btnRec);
+                }
+                if (_replyLink) {
+                    const btnReply = document.createElement('button');
+                    btnReply.type = 'button';
+                    btnReply.innerText = '💬 回复';
+                    btnReply.onclick = (ev) => {
+                        ev.preventDefault(); ev.stopPropagation();
+                        if (typeof showWindow === 'function') { try { showWindow('reply', _replyLink.href); return; } catch (err) {} }
+                        GM_openInTab(_replyLink.href, { active: true, insert: true });
+                    };
+                    btns.appendChild(btnReply);
+                }
+                if (btns.children.length) lockedBar.appendChild(btns);
+                cardWrap.appendChild(lockedBar);
+            }
 
             if (allLinks.length > 0) {
                 const cardLinkList = document.createElement('div');
