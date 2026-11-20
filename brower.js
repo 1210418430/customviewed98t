@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.33
+// @version      15.34
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -148,6 +148,35 @@
 
     const saveState = (key, value) => { GM_setValue(key, value); };
 
+    // ---- 隐藏记录的条目归一化 ----
+    // 历史上有过三种写法：[tid, ts]、纯 tid 字符串、{tid, ts} 对象（云备份/本地备份还原时混进来）。
+    // 只要有一处不是 [tid, ts]，`entry[0]` 就会变成 undefined，Set 里塞满 'tid=undefined'
+    // —— 记录条数看着没变，但一条都匹配不上，表现就是"刷新后隐藏的帖子全回来了"。
+    const parseHiddenEntry = (entry, fallbackTs) => {
+        let tid, ts;
+        if (Array.isArray(entry)) { tid = entry[0]; ts = entry[1]; }
+        else if (entry && typeof entry === 'object') { tid = entry.tid != null ? entry.tid : entry.id; ts = entry.ts != null ? entry.ts : entry.time; }
+        else { tid = entry; ts = fallbackTs; }
+        tid = String(tid == null ? '' : tid).replace(/\D/g, '');
+        if (!tid) return null;
+        ts = Number(ts);
+        // 时间戳缺失/非法时按"刚记录"处理，宁可多留也不要误删用户的记录
+        if (!Number.isFinite(ts) || ts <= 0) ts = fallbackTs;
+        return [tid, ts];
+    };
+
+    // ---- 从帖子链接里取 tid ----
+    // Discuz 有伪静态：forum.php?mod=viewthread&tid=123、thread-123-1-1.html、thread-123.html
+    // 只认 `tid=` 的话，伪静态皮肤下隐藏/收藏/记录全都不工作
+    const tidFromHref = (href) => {
+        if (!href) return '';
+        const s = String(href);
+        const m = s.match(/[?&]tid=(\d+)/)
+            || s.match(/thread-(\d+)(?:-|\.|$)/)
+            || s.match(/[?&]ptid=(\d+)/);
+        return m ? m[1] : '';
+    };
+
     // ---- 卡顿自检：主线程单个任务超过 300ms 时在控制台留一条记录 ----
     // 用户反馈"点不动、只渲染一半"时，把 F12 控制台里的 [卡顿自检] 行发我就能定位
     try {
@@ -167,15 +196,25 @@
     const HIDDEN_TID_SET = new Set();
     (function _cleanupHiddenTids() {
         const now = Date.now();
-        const maxAge = (STATE.hiddenTidsMaxDays || 30) * 86400000;
-        // 旧格式兼容：纯 tid 字符串转新格式 [tid, ts]
-        STATE.hiddenTids = STATE.hiddenTids.map(entry =>
-            Array.isArray(entry) ? entry : [entry, now]
-        ).filter(entry => {
-            if (now - entry[1] > maxAge) return false;
+        // 0 / 非法值 = 永久保留（老代码写成 `days || 30`，把"永久"当成了 30 天；
+        // 更糟的是如果存的是字符串 "0"，`"0" || 30` 得到 "0"，"0" * 86400000 = 0，
+        // maxAge 变成 0 → 每次打开页面都把全部隐藏记录判为过期删光）
+        const days = Number(STATE.hiddenTidsMaxDays);
+        const maxAge = (!Number.isFinite(days) || days <= 0) ? Infinity : days * 86400000;
+
+        const kept = [];
+        let dropped = 0;
+        (STATE.hiddenTids || []).forEach(raw => {
+            const entry = parseHiddenEntry(raw, now);
+            if (!entry) { dropped++; return; }
+            if (now - entry[1] > maxAge) return;
+            kept.push(entry);
             HIDDEN_TID_SET.add('tid=' + entry[0]);
-            return true;
         });
+        STATE.hiddenTids = kept;
+        if (dropped > 0) {
+            console.warn('[隐藏记录] 有 ' + dropped + ' 条格式无法识别，已丢弃');
+        }
         saveState('custom_hidden_tids', STATE.hiddenTids);
     })();
     const markAsRead = (url) => {
@@ -2588,8 +2627,8 @@
 
         const isKeywordBlocked = STATE.blocked.some(kw => title.includes(kw));
         const isUserBlocked = STATE.blockedUsers.includes(authorName) || (authorUID && STATE.blockedUsers.includes(authorUID));
-        const _tidMatch = url.match(/tid=(\d+)/);
-        const tidKey = _tidMatch ? 'tid=' + _tidMatch[1] : '';
+        const _tid = tidFromHref(url);
+        const tidKey = _tid ? 'tid=' + _tid : '';
         const isTidHidden = tidKey ? (HIDDEN_TID_SET.has(tidKey) && !STATE.tempUnhiddenSet.has(tidKey)) : false;
 
         if (isKeywordBlocked || isUserBlocked || isTidHidden) {
@@ -2673,8 +2712,8 @@
             const isKeywordBlocked = STATE.blocked.some(kw => title.includes(kw));
             const isUserBlocked = STATE.blockedUsers.includes(authorName) || (authorUID && STATE.blockedUsers.includes(authorUID));
             const url = link.href;
-            const _tidMatch = url.match(/tid=(\d+)/);
-            const tidKey = _tidMatch ? 'tid=' + _tidMatch[1] : '';
+            const _tid = tidFromHref(url);
+            const tidKey = _tid ? 'tid=' + _tid : '';
         const isTidHidden = tidKey ? (HIDDEN_TID_SET.has(tidKey) && !STATE.tempUnhiddenSet.has(tidKey)) : false;
 
             if (isKeywordBlocked || isUserBlocked || isTidHidden) {
@@ -2733,7 +2772,7 @@
             const oldTb = tr.parentNode;
             if (!oldTb || oldTb.tagName !== 'TBODY') return;
             const a = tr.querySelector('th a[href*="viewthread"]');
-            const tid = ((a.getAttribute('href') || '').match(/tid=(\d+)/) || [])[1] || '';
+            const tid = tidFromHref(a.getAttribute('href'));
             if (!tid) return;
             const th = tr.querySelector('th');
             if (th && !th.classList.contains('common')) th.classList.add('common');
@@ -3154,6 +3193,9 @@
     };
     fixTableColumnWidths();
     applyListColumns();
+    // 卡片初始化时（_initNodes）可能还没进入多列模式、有的 tbody 还没建好，
+    // 这里布局稳定后再把隐藏/高亮应用一遍，免得隐藏记录"看起来没生效"
+    try { reapplyFilters(); } catch (e) {}
     // 搜索页：把 li.pbw 变成卡片（多列 + 勾选 + 提取）
     initSearchPage();
 
@@ -3297,8 +3339,8 @@
                 newThreads.forEach(tbody => {
                     const link = findTitleLink(tbody);
                     if (link) {
-                        const tidMatch = link.href.match(/tid=(\d+)/);
-                        if (tidMatch && HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
+                        const _tid = tidFromHref(link.href);
+                        if (_tid && HIDDEN_TID_SET.has('tid=' + _tid)) {
                             skippedHidden++;
                             return;
                         }
@@ -4268,7 +4310,44 @@
 
     const updateHiddenTidsTitle = () => {
         hiddenTidsTitle.innerText = `🗑️ 管理隐藏记录（当前 ${STATE.hiddenTids.length} 条）`;
+        try { refreshHiddenSelfCheck(); } catch (e) {}
     };
+
+    // ---- 隐藏状态自检 ----
+    // 用户反馈"记完刷新又全出来了"，需要一眼分辨是
+    //   ① 存储没写进去（存储 0 条）  ② tid 对不上（本页 100 帖命中 0 条）
+    //   ③ 命中但没隐藏（样式/时序问题）
+    const hiddenSelfCheck = document.createElement('div');
+    hiddenSelfCheck.style.cssText = 'display:flex; align-items:center; gap:6px; margin:0 0 8px; flex-wrap:wrap;';
+    const hiddenSelfCheckInfo = document.createElement('span');
+    hiddenSelfCheckInfo.style.cssText = 'font-size:11px; color:#666; flex:1 1 100%; line-height:1.6;';
+    function refreshHiddenSelfCheck() {
+        const tbs = Array.from(document.querySelectorAll('tbody[id^="normalthread_"]'));
+        let matched = 0, hidden = 0;
+        tbs.forEach(tb => {
+            const link = findTitleLink(tb);
+            const tid = link ? tidFromHref(link.href) : '';
+            if (tid && HIDDEN_TID_SET.has('tid=' + tid)) {
+                matched++;
+                if (tb.classList.contains('custom-hidden')) hidden++;
+            }
+        });
+        hiddenSelfCheckInfo.innerText = `存储 ${STATE.hiddenTids.length} 条 · 本页 ${tbs.length} 帖，`
+            + `命中 ${matched} 条，实际隐藏 ${hidden} 条`;
+    }
+    const btnReapplyHidden = document.createElement('button');
+    btnReapplyHidden.type = 'button';
+    btnReapplyHidden.innerText = '🔄 重新应用隐藏';
+    btnReapplyHidden.style.cssText = 'font-size:11px; padding:3px 8px; cursor:pointer; background:#17a2b8; color:#fff; border:none; border-radius:3px;';
+    btnReapplyHidden.onclick = () => {
+        reapplyFilters();
+        refreshHiddenSelfCheck();
+        showToast('已按存储记录重新应用隐藏', 'info');
+    };
+    hiddenSelfCheck.appendChild(hiddenSelfCheckInfo);
+    hiddenSelfCheck.appendChild(btnReapplyHidden);
+    hiddenTidsManageWrap.appendChild(hiddenSelfCheck);
+    refreshHiddenSelfCheck();
 
     // 辅助函数：清除指定条件的记录并刷新
     const clearHiddenTidsByFilter = (filterFn, desc) => {
@@ -5298,7 +5377,7 @@
         // ---- 收藏按钮（列表页提取区，位于图片下方、链接上方） ----
         (() => {
             // 兼容两种链接形态：forum.php?mod=viewthread&tid=123 与伪静态 /thread-123-1-1.html
-            const _bmTid = (threadUrl.match(/tid=(\d+)/) || threadUrl.match(/thread-(\d+)-/) || [])[1];
+            const _bmTid = tidFromHref(threadUrl);
             if (_bmTid) {
                 const _bmTitle = (() => {
                     const link = findTitleLink(tbody);
@@ -6465,8 +6544,8 @@
             document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
                 const link = findTitleLink(tbody);
                 if (link) {
-                    const tidMatch = link.href.match(/tid=(\d+)/);
-                    if (tidMatch) items.push({ tid: tidMatch[1], key: 'tid=' + tidMatch[1] });
+                    const tid = tidFromHref(link.href);
+                    if (tid) items.push({ tid: tid, key: 'tid=' + tid });
                 }
             });
             return items;
@@ -6497,7 +6576,37 @@
             }
         }
 
+        // 写入前先把存储里的最新记录合并进来。
+        // 多标签页时本页内存里的 STATE.hiddenTids 可能是旧的，直接覆盖会把别的标签页
+        // 刚记下的帖子整批冲掉（表现就是"我明明记过，过一会儿又全露出来了"）。
+        try {
+            const latest = GM_getValue('custom_hidden_tids', []);
+            if (Array.isArray(latest)) {
+                latest.forEach(raw => {
+                    const e = parseHiddenEntry(raw, now);
+                    if (!e) return;
+                    const key = 'tid=' + e[0];
+                    if (!HIDDEN_TID_SET.has(key)) {
+                        HIDDEN_TID_SET.add(key);
+                        STATE.hiddenTids.push(e);
+                    }
+                });
+            }
+        } catch (e) {}
+
         saveState('custom_hidden_tids', STATE.hiddenTids);
+
+        // 回读校验：Tampermonkey 存储写失败时不会抛错（配额/同步冲突时是静默的），
+        // 只有回读才知道到底存进去没有
+        let storeLen = -1;
+        try {
+            const back = GM_getValue('custom_hidden_tids', []);
+            storeLen = Array.isArray(back) ? back.length : -1;
+        } catch (e) {}
+        if (storeLen >= 0 && storeLen !== STATE.hiddenTids.length) {
+            showPersistentToast('⚠️ 隐藏记录写入异常：内存 ' + STATE.hiddenTids.length +
+                ' 条，存储里只有 ' + storeLen + ' 条。可能被其它标签页或浏览器同步覆盖了。', 'error');
+        }
 
         // 执行过滤
         let hiddenCount = 0, visibleCount = 0;
@@ -6505,8 +6614,8 @@
             tbody.classList.remove('custom-hidden');
             const link = findTitleLink(tbody);
             if (link) {
-                const tidMatch = link.href.match(/tid=(\d+)/);
-                if (tidMatch && HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
+                const _tid = tidFromHref(link.href);
+                if (_tid && HIDDEN_TID_SET.has('tid=' + _tid)) {
                     tbody.classList.add('custom-hidden');
                     const cb = tbody.querySelector('.custom-thread-checkbox');
                     if (cb) cb.checked = false;
@@ -6557,9 +6666,9 @@
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
             const link = findTitleLink(tbody);
             if (link) {
-                const tidMatch = link.href.match(/tid=(\d+)/);
-                if (tidMatch) {
-                    const key = 'tid=' + tidMatch[1];
+                const _tid = tidFromHref(link.href);
+                if (_tid) {
+                    const key = 'tid=' + _tid;
                     if (HIDDEN_TID_SET.has(key)) {
                         STATE.tempUnhiddenSet.add(key);
                         shown++;
@@ -6601,8 +6710,8 @@
         document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden)').forEach(tbody => {
             const link = findTitleLink(tbody);
             if (link) {
-                const tidMatch = link.href.match(/tid=(\d+)/);
-                if (tidMatch && !HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
+                const _tid = tidFromHref(link.href);
+                if (_tid && !HIDDEN_TID_SET.has('tid=' + _tid)) {
                     unrecorded++;
                 }
             }
@@ -6921,7 +7030,7 @@
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
             const link = findTitleLink(tbody);
             if (!link) return;
-            const tid = (link.href.match(/tid=(\d+)/) || [])[1];
+            const tid = tidFromHref(link.href);
             if (!tid) return;
             const curType = getBookmarkType(tid);
             // 收藏按钮可能挂在吸顶区（.custom-card-head）里，也可能在提取区
@@ -7657,7 +7766,7 @@
         const allMergedTexts = [];
 
         // ---- 收藏小球点击逻辑（详情页专用） ----
-        const _detailTid = (location.href.match(/tid=(\d+)/) || [])[1];
+        const _detailTid = tidFromHref(location.href);
         const _detailTitle = (() => {
             if (!_detailTid) return '';
             const t = document.querySelector('#thread_subject') || document.querySelector('h1.ts') || document.querySelector('title');
