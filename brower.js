@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.34
+// @version      15.35
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -6695,15 +6695,31 @@
     btnBookmarks.onclick = () => showDashboard('bookmarks');
     btnGroup.appendChild(btnBookmarks);
 
-    // 拦截分页跳转：跳转前提示记录当前页帖子
+    // 拦截跳转：跳转前提示记录当前页帖子
+    // 覆盖三种"离开当前列表"的入口：分页 / 下一页按钮 / 排行榜切换（tag 与时间范围）
     let _pageNavBusy = false;
     document.addEventListener('click', async (e) => {
         if (_pageNavBusy) return;
         const pgLink = e.target.closest('.pg a[href]');
         const autopbn = e.target.closest('#autopbn');
-        if (!pgLink && !autopbn) return;
+        // 排行榜：ul.tb.cl 是「回复/查看/分享/收藏/热度排行」，p#before 是「本周/本月/今日/全部」。
+        // 这两处都是普通 <a> 跳转，不经过分页逻辑，所以之前切榜时当前页一条都不会被记录
+        const rankTab = e.target.closest('ul.tb.cl a[href*="mod=ranklist"]');
+        const rankRange = e.target.closest('p#before a[href*="mod=ranklist"]');
+        const rankLink = rankTab || rankRange;
+        if (!pgLink && !autopbn && !rankLink) return;
         // 排除当前页指示器（strong 标签）
         if (!pgLink && e.target.closest('strong')) return;
+        // 排除排行榜里"当前选中项"（li.a / a.a），它指向的就是本页，点了也是原地刷新
+        if (rankLink) {
+            if (rankLink.closest('li') && rankLink.closest('li').classList.contains('a')) return;
+            if (rankLink.classList.contains('a')) return;
+            try {
+                const u = new URL(rankLink.href, location.href);
+                const cur = new URL(location.href);
+                if (u.pathname === cur.pathname && u.search === cur.search) return;
+            } catch (err) {}
+        }
 
         // 统计当前页未记录的可见帖子
         let unrecorded = 0;
@@ -6721,9 +6737,13 @@
         e.preventDefault();
         e.stopPropagation();
 
-        const destUrl = pgLink ? pgLink.href : '';
+        const destUrl = pgLink ? pgLink.href : (rankLink ? rankLink.href : '');
+        // 提示里说清楚要跳到哪儿，避免用户以为是"同一个排行榜刷新"
+        const navLabel = rankTab
+            ? '切换到「' + (rankTab.innerText || '').trim() + '」前'
+            : (rankRange ? '切换到「' + (rankRange.innerText || '').trim() + '」时间范围前' : '跳转前');
 
-        if (confirm(`⚠️ 当前页有 ${unrecorded} 条帖子未记录，跳转前是否记录？\n\n"确定" = 自动记录并跳转\n"取消" = 不记录直接跳转`)) {
+        if (confirm(`⚠️ 当前页有 ${unrecorded} 条帖子未记录，${navLabel}是否记录？\n\n"确定" = 自动记录并跳转\n"取消" = 不记录直接跳转`)) {
             const stats = await recordCurrentPageTids();
             const msgs = [
                 `📊 扫描 ${stats.scanned} 条，新增 ${stats.added} 条`,
