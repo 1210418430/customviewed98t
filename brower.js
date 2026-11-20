@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.31
+// @version      15.32
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -330,12 +330,16 @@
             flex: 0 0 100%;
             max-width: 100%;
         }
+        /* 排行榜（ranklist）的表头行「主题 / 版块 / 作者 / 热度」在卡片模式下没意义 */
+        table.custom-grid-mode > tbody > tr.th { display: none !important; }
         /* 隐藏类优先级最高 */
         table.custom-grid-mode > tbody.custom-hidden { display: none !important; }
-        /* 卡片内：第一行 [勾选][标题]，第二行 [作者][回复数] */
+        /* 卡片内：第一行 [图标][标题]，第二行 [作者][热度/回复]，第三行 [版块]（排行榜页才有） */
         table.custom-grid-mode > tbody[id^="normalthread_"] > tr {
             display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto;
+            /* 第一列必须写死宽度：排行榜的「版块」单元格 max-content 能到 150px，
+               用 auto 会让 1fr 的标题列只剩十几像素（标题一个字一行） */
+            grid-template-columns: 24px minmax(0, 1fr) auto;
             column-gap: 6px;
             row-gap: 2px;
             align-items: baseline;
@@ -353,6 +357,10 @@
         }
         table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.icn {
             grid-column: 1; grid-row: 1;
+            min-width: 0;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.icn img {
+            max-width: 100% !important; height: auto !important;
         }
         table.custom-grid-mode > tbody[id^="normalthread_"] > tr > th.common {
             grid-column: 2 / span 2; grid-row: 1;
@@ -362,7 +370,6 @@
         table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.by,
         table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.num,
         table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.frm {
-            grid-row: 2;
             font-size: 11px;
             color: #888;
             min-width: 0;
@@ -370,9 +377,53 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.frm { grid-column: 1; }
-        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.by { grid-column: 2; }
-        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.num { grid-column: 3; justify-self: end; }
+        /* 作者 + 热度同一行；版块单独一行垫在最下面（没有版块列时这一行自然消失） */
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.by {
+            grid-column: 1 / span 2; grid-row: 2;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.num {
+            grid-column: 3; grid-row: 2; justify-self: end;
+        }
+        table.custom-grid-mode > tbody[id^="normalthread_"] > tr > td.frm {
+            grid-column: 1 / span 3; grid-row: 3;
+        }
+        /* 搬进吸顶区的作者/热度/版块行（搬过去后就不再是 tr 的直接子元素） */
+        table.custom-grid-mode .custom-meta-line {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 0 8px;
+            margin: 2px 0 4px;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #888;
+        }
+        table.custom-grid-mode .custom-meta-line > td {
+            display: block !important;
+            min-width: 0;
+            max-width: 100%;
+            padding: 0 !important;
+            border: none !important;
+            background: none !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 11px;
+            color: #888;
+        }
+        table.custom-grid-mode .custom-meta-line > td.num { margin-left: auto; flex: 0 0 auto; }
+        table.custom-grid-mode .custom-meta-line > td.by { flex: 1 1 auto; }
+        table.custom-grid-mode .custom-meta-line > td.frm { flex: 0 0 auto; }
+        table.custom-grid-mode .custom-meta-line cite { font-style: normal; }
+        /* 作者单元格里的时间在窄卡片里必须留在同一行，否则 meta 行会占三行高 */
+        table.custom-grid-mode .custom-meta-line > td.by em,
+        table.custom-grid-mode .custom-meta-line > td.by cite,
+        table.custom-grid-mode .custom-meta-line > td.by cite a {
+            display: inline !important;
+            float: none !important;
+            margin: 0 4px 0 0 !important;
+            font-style: normal !important;
+        }
         /* 标题换行，不撑破卡片 */
         table.custom-grid-mode > tbody[id^="normalthread_"] th a.xst,
         table.custom-grid-mode > tbody[id^="normalthread_"] th a[href*="thread-"] {
@@ -817,6 +868,16 @@
     });
 
     // ================= 核心功能函数 =================
+    // 统一找「帖子标题链接」：forumdisplay 是 a.xst / 伪静态 thread-xxx，
+    // 排行榜（misc.php?mod=ranklist）是 th > a[href*=viewthread]，两者都得认
+    const findTitleLink = (scope) => {
+        if (!scope) return null;
+        return scope.querySelector('a.xst')
+            || scope.querySelector('th a[href*="viewthread"]')
+            || scope.querySelector('th a[href*="thread-"]')
+            || scope.querySelector('a[href*="viewthread"]');
+    };
+
     const addViewedTag = (linkNode) => {
         if (linkNode && !linkNode.parentNode.querySelector('.custom-viewed-tag')) {
             const tag = document.createElement('span');
@@ -2377,7 +2438,7 @@
         const exist = head.querySelector('.custom-code-bar');
         if (exist) return exist;
 
-        const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+        const link = findTitleLink(tbody);
         const titleRaw = link ? (link.textContent || '').replace(/\s+/g, ' ').trim() : '';
         const code = extractCode(titleRaw);
         // 没有番号就退回用标题当搜索词（去掉【】方括号这类噪声）
@@ -2441,7 +2502,7 @@
     // 开关切换后，对页面上已有的全部帖子统一应用 / 撤销
     const applyTitleCopy = () => {
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
-            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            const link = findTitleLink(tbody);
             if (link) ensureTitleCopy(tbody, link);
         });
     };
@@ -2450,7 +2511,7 @@
         if (tbody.hasAttribute('data-custom-processed')) return;
         tbody.setAttribute('data-custom-processed', 'true');
 
-        let link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+        let link = findTitleLink(tbody);
         if (!link) return;
 
         const title = link.innerText;
@@ -2498,6 +2559,27 @@
         // 钉着的标题下面补一行番号搜索按钮（排在可复制文本之后，不提取内容也生效）
         if (cardHead) ensureCodeBar(tbody, cardHead);
 
+        // 作者/热度/回复/版块 收进吸顶区：卡片被图片撑到上千像素后，
+        // 这几格留在表格行底部会离标题很远，滚到图片区就完全看不到作者了
+        if (cardHead) {
+            const _table = tbody.closest('table');
+            const _tr = tbody.querySelector('tr');
+            if (_table && _table.classList.contains('custom-grid-mode') && _tr) {
+                const _metaCells = ['td.by', 'td.frm', 'td.num']
+                    .map(sel => Array.from(_tr.children).find(c => c.matches && c.matches(sel)))
+                    .filter(Boolean);
+                if (_metaCells.length) {
+                    const metaLine = document.createElement('div');
+                    metaLine.className = 'custom-meta-line';
+                    _metaCells.forEach(c => metaLine.appendChild(c));
+                    const anchor = cardHead.querySelector('.custom-title-copy')
+                        || cardHead.querySelector('.custom-code-bar');
+                    if (anchor) cardHead.insertBefore(metaLine, anchor);
+                    else cardHead.appendChild(metaLine);
+                }
+            }
+        }
+
         // 拖选文字时不再误触发跳转
         let _downX = 0, _downY = 0;
         link.addEventListener('mousedown', (e) => { _downX = e.clientX; _downY = e.clientY; });
@@ -2525,7 +2607,7 @@
 
     const reapplyFilters = () => {
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
-            let link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            let link = findTitleLink(tbody);
             if (!link) return;
             const title = link.innerText;
 
@@ -2581,6 +2663,46 @@
         if (!_nodeQueueRaf) _nodeQueueRaf = _queueTick(_flushNodeQueue);
     };
 
+
+    // 排行榜（misc.php?mod=ranklist）：帖子是普通 <tr>，没有 tbody[id^=normalthread_]，
+    // 所有按 tbody 写的逻辑都碰不到它。这里把每个帖子行单独包一层 tbody 并补上
+    // forumdisplay 的语义 class（th.common / td.num），后面的卡片网格、吸顶标题、
+    // 勾选框、提取、多列就全部原样复用了，不用再写第二套。
+    const wrapRanklistRows = () => {
+        const table = document.querySelector('div.tl table');
+        if (!table || table.id === 'threadlisttableid') return 0;
+        const rows = Array.from(table.querySelectorAll('tr')).filter(tr =>
+            !tr.classList.contains('th') && tr.querySelector('th a[href*="viewthread"]')
+        );
+        let n = 0;
+        // 新 tbody 必须插到 table 里（旧 tbody 的兄弟位置），插进旧 tbody 里会变成嵌套 tbody，
+        // 那样 `table.custom-grid-mode > tbody` 的卡片样式一条都匹配不上
+        const _lastInserted = new Map();
+        rows.forEach(tr => {
+            if (tr.closest('tbody[id^="normalthread_"]')) return;
+            const oldTb = tr.parentNode;
+            if (!oldTb || oldTb.tagName !== 'TBODY') return;
+            const a = tr.querySelector('th a[href*="viewthread"]');
+            const tid = ((a.getAttribute('href') || '').match(/tid=(\d+)/) || [])[1] || '';
+            if (!tid) return;
+            const th = tr.querySelector('th');
+            if (th && !th.classList.contains('common')) th.classList.add('common');
+            // 最后一列是热度/回复数，补个 num 让它按卡片右下角排版
+            const cells = Array.from(tr.children).filter(c => c.tagName === 'TD');
+            const lastCell = cells[cells.length - 1];
+            if (lastCell && !lastCell.className) lastCell.classList.add('num');
+            const tb = document.createElement('tbody');
+            tb.id = 'normalthread_' + tid;
+            const anchor = _lastInserted.get(oldTb) || oldTb;
+            anchor.parentNode.insertBefore(tb, anchor.nextSibling);
+            _lastInserted.set(oldTb, tb);
+            tb.appendChild(tr);
+            n++;
+        });
+        return n;
+    };
+    const _ranklistWrapped = wrapRanklistRows() > 0;
+
     const _initNodes = Array.from(document.querySelectorAll('tbody[id^="normalthread_"]'));
     if (_initNodes.length <= 40) {
         // 首屏卡片不多时直接同步处理，避免样式晚一帧闪一下
@@ -2604,6 +2726,7 @@
             }
         }
     });
+
 
     // 兼容 forumdisplay / guide / 其他列表页的不同容器
     const threadListContainer = (() => {
@@ -2988,6 +3111,8 @@
     const autoLoadNextPage = async () => {
         // 搜索页结果不是 tbody 结构，走了也插不进来，直接跳过
         if (!threadListContainer || searchRoot()) return;
+        // 排行榜的行是现场包出来的 tbody，翻页取回来的仍是裸 tr，插不进来
+        if (_ranklistWrapped) return;
         if (!STATE.autoLoadNextPage || STATE.isLoadingNextPage || !STATE.nextPageUrl) return;
         STATE.isLoadingNextPage = true;
 
@@ -2997,6 +3122,9 @@
             const doc = new DOMParser().parseFromString(text, 'text/html');
 
             const newThreads = doc.querySelectorAll('tbody[id^="normalthread_"]');
+            // 拿回来的页面里没有帖子行（排行榜这种表结构不同的页面）→ 别再往下翻，
+            // 否则每滚到底就白发一次请求、还什么都不插进去
+            if (newThreads.length === 0) { STATE.nextPageUrl = null; return; }
             newThreads.forEach(tbody => {
                 threadListContainer.appendChild(tbody);
             });
@@ -3047,6 +3175,8 @@
     // ================= 一次性加载多页 =================
     const bulkLoadPages = async (pageCount) => {
         if (STATE.isLoadingNextPage) return;
+        // 排行榜的帖子行不是真 tbody，翻页内容插不进来
+        if (_ranklistWrapped) { showToast('排行榜页面不支持批量翻页', 'error'); return 0; }
         STATE.isLoadingNextPage = true;
 
         let nextUrl = document.querySelector('a.nxt')?.href;
@@ -3115,7 +3245,7 @@
                 const newThreads = doc.querySelectorAll('tbody[id^="normalthread_"]');
 
                 newThreads.forEach(tbody => {
-                    const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                    const link = findTitleLink(tbody);
                     if (link) {
                         const tidMatch = link.href.match(/tid=(\d+)/);
                         if (tidMatch && HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
@@ -4770,7 +4900,7 @@
 
         const threadUrl = cb.value;
         markAsRead(threadUrl);
-        addViewedTag(tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]'));
+        addViewedTag(findTitleLink(tbody));
 
         const data = await fetchThreadData(threadUrl);
         if (!data) { restoreOldBox(); return; }
@@ -5121,7 +5251,7 @@
             const _bmTid = (threadUrl.match(/tid=(\d+)/) || threadUrl.match(/thread-(\d+)-/) || [])[1];
             if (_bmTid) {
                 const _bmTitle = (() => {
-                    const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                    const link = findTitleLink(tbody);
                     return link ? link.innerText.trim() : threadUrl;
                 })();
                 const bmRow = document.createElement('div');
@@ -5248,7 +5378,7 @@
 
             // 本楼所属帖子的标题（用于「推送+标题」改名）
             const postTitle = (() => {
-                const a = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                const a = findTitleLink(tbody);
                 return a ? a.innerText.trim().replace(/\s+/g, ' ') : '';
             })();
 
@@ -5298,7 +5428,7 @@
                 pushFolderBtn.style.cssText = 'font-size:12px; cursor:pointer; padding:4px 24px; background:#0d6efd; color:#fff; border:none; border-radius:3px; font-weight:bold;';
                 pushFolderBtn.onclick = (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
-                    const titleLink = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                    const titleLink = findTitleLink(tbody);
                     let folderName = titleLink ? titleLink.innerText.trim() : '';
                     // 过滤文件名非法字符并限制长度
                     folderName = folderName.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 100);
@@ -5417,10 +5547,17 @@
         }
 
         // 用 rAF 批量插入 DOM，减少画面抖动（刷新时原地替换旧内容，不产生高度塌陷）
-        if (box.innerHTML) {
+        // 多列模式下链接面板/购买条被搬进了吸顶区，box 里可能一张图都没有——
+        // 这种帖子（无图 + 需购买）不能因为 box 空就当"没提取到"，否则永远不会生成
+        // .custom-extracted：卡片没有"已提取"标记，刷新按钮和跳过逻辑都会失效
+        const _stickyHasResult = !!(stickyMount && stickyMount.querySelector('.custom-buy-bar, .custom-link-header'));
+        if (box.innerHTML || _stickyHasResult) {
             requestAnimationFrame(() => {
                 if (existingBox && existingBox.isConnected) existingBox.replaceWith(box);
-                else tbody.querySelector('th').appendChild(box);
+                else {
+                    const _host = tbody.querySelector('th');
+                    if (_host) _host.appendChild(box);
+                }
             });
         } else {
             restoreOldBox();
@@ -5468,7 +5605,7 @@
             cbs.forEach(cb => {
                 markAsRead(cb.value);
                 const tbody = cb.closest('tbody');
-                addViewedTag(tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]'));
+                addViewedTag(findTitleLink(tbody));
 
                 GM_openInTab(cb.value, { active: false, insert: true });
             });
@@ -6276,7 +6413,7 @@
         const collectTids = () => {
             const items = [];
             document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
-                const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+                const link = findTitleLink(tbody);
                 if (link) {
                     const tidMatch = link.href.match(/tid=(\d+)/);
                     if (tidMatch) items.push({ tid: tidMatch[1], key: 'tid=' + tidMatch[1] });
@@ -6316,7 +6453,7 @@
         let hiddenCount = 0, visibleCount = 0;
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
             tbody.classList.remove('custom-hidden');
-            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            const link = findTitleLink(tbody);
             if (link) {
                 const tidMatch = link.href.match(/tid=(\d+)/);
                 if (tidMatch && HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
@@ -6368,7 +6505,7 @@
     const unhideCurrentPageTids = () => {
         let shown = 0;
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
-            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            const link = findTitleLink(tbody);
             if (link) {
                 const tidMatch = link.href.match(/tid=(\d+)/);
                 if (tidMatch) {
@@ -6412,7 +6549,7 @@
         // 统计当前页未记录的可见帖子
         let unrecorded = 0;
         document.querySelectorAll('tbody[id^="normalthread_"]:not(.custom-hidden)').forEach(tbody => {
-            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            const link = findTitleLink(tbody);
             if (link) {
                 const tidMatch = link.href.match(/tid=(\d+)/);
                 if (tidMatch && !HIDDEN_TID_SET.has('tid=' + tidMatch[1])) {
@@ -6732,7 +6869,7 @@
     const updateListBmBtns = () => {
         const inactiveOpacity = '0.5';
         document.querySelectorAll('tbody[id^="normalthread_"]').forEach(tbody => {
-            const link = tbody.querySelector('a.xst') || tbody.querySelector('th a[href*="thread-"]');
+            const link = findTitleLink(tbody);
             if (!link) return;
             const tid = (link.href.match(/tid=(\d+)/) || [])[1];
             if (!tid) return;
@@ -8109,7 +8246,7 @@
                 if (el) {
                     const row = el.closest('tbody[id^="normalthread_"]');
                     if (row) {
-                        const a = row.querySelector('a.xst') || row.querySelector('th a[href*="thread-"]');
+                        const a = findTitleLink(row);
                         if (a) return (a.textContent || '').trim();
                     }
                     const subj = el.closest('#thread_subject') || document.getElementById('thread_subject');
