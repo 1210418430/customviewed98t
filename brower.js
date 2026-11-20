@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         论坛小脚本-全能看帖与提取辅助
 // @namespace    http://tampermonkey.net/
-// @version      15.32
+// @version      15.33
 // @description  无缝翻页、悬浮预览、资源提取、屏蔽高亮关键词、按用户/UID屏蔽、已读记忆、修复复制Bug、115离线下载、书签收藏与云备份
 // @author       鲜切红薯片
 //
@@ -478,6 +478,56 @@
             overflow: visible;
             box-shadow: none;
         }
+        /* ============ 排行榜页（misc.php?mod=ranklist）主列加宽 ============ */
+        /* 站点给排行榜页写死了三处宽度：#wp / .ct2_a 是 2000px + 负 margin（横向溢出），
+           .mn 是 800px（float:right），左边导航 .appl 只有 ~137px。
+           结果内容列只占屏幕一半，右边一大片空白。这里只在这一页放开，其他页面不动。
+           注意页头的 .hdc / #um 也是 .wp（class）写死 2000px，光改 #wp 仍会横向溢出。 */
+        body.pg_ranklist .wp,
+        body.pg_ranklist #wp,
+        body.pg_ranklist #hd,
+        body.pg_ranklist #nv,
+        body.pg_ranklist .hdc,
+        body.pg_ranklist .ct2_a {
+            width: 100% !important;
+            max-width: 100% !important;
+            margin-right: 0 !important;
+            box-sizing: border-box;
+        }
+        body.pg_ranklist #nv ul {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+        body.pg_ranklist .ct2_a {
+            display: flex !important;
+            flex-wrap: wrap;              /* 万一模板多出第三块（清除浮动等），换行而不是挤压主列 */
+            align-items: flex-start;
+            gap: 10px;
+            padding: 0 10px;
+        }
+        body.pg_ranklist .ct2_a > .mn {
+            flex: 1 1 auto;
+            width: auto !important;
+            max-width: none !important;
+            min-width: 0;
+            float: none !important;
+            margin: 0 !important;
+        }
+        body.pg_ranklist .ct2_a > .appl {
+            flex: 0 0 auto;
+            order: -1;
+            float: none !important;
+        }
+        /* .mn 里那几个写死 800px 的块（diy 区、版块块）也得跟着放开 */
+        body.pg_ranklist .mn > .area,
+        body.pg_ranklist .mn .area,
+        body.pg_ranklist .mn .bm,
+        body.pg_ranklist .mn .tl {
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box;
+        }
+
         /* ============ 搜索页（search.php）卡片化 + 多列 ============ */
         /* 搜索页原始结果区自带固定 760px 宽度，卡片化后要放开到容器满宽，否则卡片全挤在左半屏 */
         div.slst.custom-search-grid {
